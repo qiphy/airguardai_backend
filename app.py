@@ -34,11 +34,14 @@ app = FastAPI(title="AirGuard AI Backend")
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=False,
+    allow_origins=["*"],          # or set your exact web origin
+    allow_credentials=False,      # MUST be False if allow_origins=["*"]
     allow_methods=["*"],
     allow_headers=["*"],
+    expose_headers=["*"],
+    max_age=86400,
 )
+
 
 _cache: Dict[str, Dict[str, Any]] = {}
 
