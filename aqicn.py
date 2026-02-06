@@ -48,7 +48,7 @@ def fetch_aqicn(
     if not token:
         raise AQICNError("Missing AQICN_TOKEN environment variable.")
 
-    query = city  # keep original query (can be "@1451" or "geo:..")
+    query = city  # can be "@1451" or "geo:.."
     url = f"{AQICN_BASE}/feed/{query}/"
     params = {"token": token}
 
@@ -101,9 +101,7 @@ def fetch_aqicn(
     return {
         "aqi": aqi,
         "station": station_name,
-        # IMPORTANT: "city" now becomes the RESOLVED readable name (not the query)
         "city": station_name or query,
-        # keep original query too
         "query": query,
         "pm25": get_val("pm25"),
         "pm10": get_val("pm10"),

@@ -1,148 +1,240 @@
+from __future__ import annotations
+
+import os
 import sqlite3
-from pathlib import Path
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
+from typing import Any, Dict, List, Optional
 
-DB_PATH = Path(__file__).parent / "airguard.db"
+DB_PATH = os.getenv("DB_PATH", "airguard.db")
 
-def init_db():
-    conn = sqlite3.connect(DB_PATH)
-    cur = conn.cursor()
 
-    cur.execute("""
-    CREATE TABLE IF NOT EXISTS readings (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      ts TEXT,
-      location TEXT,
-      aqi INTEGER,
-      pm25 REAL,
-      pm10 REAL,
-      o3 REAL,
-      co REAL,
-      no2 REAL,
-      so2 REAL,
-      station TEXT
-    );
-    """)
+def _conn() -> sqlite3.Connection:
+    con = sqlite3.connect(DB_PATH, check_same_thread=False)
+    con.row_factory = sqlite3.Row
+    return con
 
-    cur.execute("""
-    CREATE TABLE IF NOT EXISTS feedback (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      ts TEXT,
-      name TEXT,
-      profile TEXT,
-      rating INTEGER,
-      comment TEXT
-    );
-    """)
 
-    cur.execute("""
-    CREATE TABLE IF NOT EXISTS alerts (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      ts TEXT,
-      location TEXT,
-      alert_type TEXT,
-      message TEXT,
-      severity TEXT
-    );
-    """)
+def _table_has_column(con: sqlite3.Connection, table: str, col: str) -> bool:
+    cur = con.execute(f"PRAGMA table_info({table})")
+    cols = [r["name"] for r in cur.fetchall()]
+    return col in cols
 
-    cur.execute("""
-    CREATE TABLE IF NOT EXISTS metrics (
-      key TEXT PRIMARY KEY,
-      value INTEGER
-    );
-    """)
 
-    conn.commit()
-    conn.close()
+def init_db() -> None:
+    con = _conn()
+    try:
+        con.execute(
+            """
+            CREATE TABLE IF NOT EXISTS readings (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                ts TEXT NOT NULL,
+                location TEXT NOT NULL,
+                station TEXT,
+                aqi REAL,
+                pm25 REAL,
+                pm10 REAL,
+                o3 REAL,
+                co REAL,
+                no2 REAL,
+                so2 REAL
+            )
+            """
+        )
 
-def _inc_metric(key: str, n: int = 1):
-    conn = sqlite3.connect(DB_PATH)
-    cur = conn.cursor()
-    cur.execute("INSERT INTO metrics(key, value) VALUES(?, ?) ON CONFLICT(key) DO UPDATE SET value=value+?",
-                (key, n, n))
-    conn.commit()
-    conn.close()
+        # Add uid column if missing
+        if not _table_has_column(con, "readings", "uid"):
+            con.execute("ALTER TABLE readings ADD COLUMN uid INTEGER")
 
-def record_reading(row: dict):
-    _inc_metric("readings_ingested", 1)
-    conn = sqlite3.connect(DB_PATH)
-    cur = conn.cursor()
-    cur.execute("""
-      INSERT INTO readings(ts, location, aqi, pm25, pm10, o3, co, no2, so2, station)
-      VALUES(?,?,?,?,?,?,?,?,?,?)
-    """, (
-        row.get("ts"),
-        row.get("location"),
-        row.get("aqi"),
-        row.get("pm25"),
-        row.get("pm10"),
-        row.get("o3"),
-        row.get("co"),
-        row.get("no2"),
-        row.get("so2"),
-        row.get("station"),
-    ))
-    conn.commit()
-    conn.close()
+        con.execute(
+            """
+            CREATE TABLE IF NOT EXISTS tracked_locations (
+                uid INTEGER PRIMARY KEY,
+                name TEXT NOT NULL,
+                created_ts TEXT NOT NULL
+            )
+            """
+        )
 
-def fetch_history(location: str, hours: int):
-    conn = sqlite3.connect(DB_PATH)
-    cur = conn.cursor()
-    cur.execute("""
-      SELECT ts, aqi, pm25, pm10, o3, co, no2, so2
-      FROM readings
-      WHERE location = ?
-      ORDER BY ts DESC
-      LIMIT ?
-    """, (location, hours * 12))  # approx 12 points/hour if you refresh every 5 min
-    rows = cur.fetchall()
-    conn.close()
-    rows.reverse()
-    return [
-        {"ts": r[0], "aqi": r[1], "pm25": r[2], "pm10": r[3], "o3": r[4], "co": r[5], "no2": r[6], "so2": r[7]}
-        for r in rows
-    ]
+        con.execute(
+            """
+            CREATE TABLE IF NOT EXISTS feedback (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                ts TEXT NOT NULL,
+                name TEXT NOT NULL,
+                profile TEXT NOT NULL,
+                rating INTEGER NOT NULL,
+                comment TEXT NOT NULL
+            )
+            """
+        )
 
-def add_feedback(name: str, profile: str, rating: int, comment: str):
-    _inc_metric("feedback_count", 1)
-    conn = sqlite3.connect(DB_PATH)
-    cur = conn.cursor()
-    cur.execute("""
-      INSERT INTO feedback(ts, name, profile, rating, comment)
-      VALUES(?,?,?,?,?)
-    """, (datetime.now(timezone.utc).isoformat(), name, profile, rating, comment))
-    conn.commit()
-    conn.close()
+        con.execute(
+            """
+            CREATE TABLE IF NOT EXISTS alerts (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                ts TEXT NOT NULL,
+                level TEXT NOT NULL,
+                message TEXT NOT NULL
+            )
+            """
+        )
 
-def add_alert(location: str, alert_type: str, message: str, severity: str):
-    _inc_metric("alerts_fired", 1)
-    conn = sqlite3.connect(DB_PATH)
-    cur = conn.cursor()
-    cur.execute("""
-      INSERT INTO alerts(ts, location, alert_type, message, severity)
-      VALUES(?,?,?,?,?)
-    """, (datetime.now(timezone.utc).isoformat(), location, alert_type, message, severity))
-    conn.commit()
-    conn.close()
+        con.commit()
+    finally:
+        con.close()
 
-def list_alerts(limit: int = 50):
-    conn = sqlite3.connect(DB_PATH)
-    cur = conn.cursor()
-    cur.execute("""
-      SELECT ts, location, alert_type, message, severity
-      FROM alerts
-      ORDER BY ts DESC
-      LIMIT ?
-    """, (limit,))
-    rows = cur.fetchall()
-    conn.close()
-    return [{"ts": r[0], "location": r[1], "type": r[2], "message": r[3], "severity": r[4]} for r in rows]
 
-def get_metrics():
-    conn = sqlite3.connect(DB_PATH)
-    cur = conn.cursor()
-    cur.execute("SELECT key, value FROM metrics")
-    rows = cur.fetchall()
-    conn.close()
-    return {k: v for (k, v) in rows}
+def record_reading(r: Dict[str, Any]) -> None:
+    """
+    Expected keys:
+      ts, location, station, aqi, pm25, pm10, o3, co, no2, so2
+      optional: uid (int)
+    """
+    con = _conn()
+    try:
+        con.execute(
+            """
+            INSERT INTO readings (ts, uid, location, station, aqi, pm25, pm10, o3, co, no2, so2)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                r.get("ts"),
+                r.get("uid"),
+                r.get("location") or "Unknown",
+                r.get("station"),
+                r.get("aqi"),
+                r.get("pm25"),
+                r.get("pm10"),
+                r.get("o3"),
+                r.get("co"),
+                r.get("no2"),
+                r.get("so2"),
+            ),
+        )
+        con.commit()
+    finally:
+        con.close()
+
+
+def track_location(uid: int, name: str) -> None:
+    con = _conn()
+    try:
+        con.execute(
+            """
+            INSERT INTO tracked_locations (uid, name, created_ts)
+            VALUES (?, ?, ?)
+            ON CONFLICT(uid) DO UPDATE SET name=excluded.name
+            """,
+            (int(uid), name, datetime.now(timezone.utc).isoformat()),
+        )
+        con.commit()
+    finally:
+        con.close()
+
+
+def list_tracked_locations() -> List[Dict[str, Any]]:
+    con = _conn()
+    try:
+        cur = con.execute(
+            "SELECT uid, name, created_ts FROM tracked_locations ORDER BY created_ts DESC"
+        )
+        return [dict(r) for r in cur.fetchall()]
+    finally:
+        con.close()
+
+
+def _since_iso(hours: int) -> str:
+    since = datetime.now(timezone.utc) - timedelta(hours=int(hours))
+    return since.isoformat()
+
+
+def fetch_history(location: str, hours: int) -> List[Dict[str, Any]]:
+    """
+    Backward-compatible: history by location string.
+    """
+    con = _conn()
+    try:
+        cur = con.execute(
+            """
+            SELECT ts, uid, location, station, aqi, pm25, pm10, o3, co, no2, so2
+            FROM readings
+            WHERE location = ?
+              AND ts >= ?
+            ORDER BY ts ASC
+            """,
+            (location, _since_iso(hours)),
+        )
+        return [dict(r) for r in cur.fetchall()]
+    finally:
+        con.close()
+
+
+def fetch_history_by_uid(uid: int, hours: int) -> List[Dict[str, Any]]:
+    con = _conn()
+    try:
+        cur = con.execute(
+            """
+            SELECT ts, uid, location, station, aqi, pm25, pm10, o3, co, no2, so2
+            FROM readings
+            WHERE uid = ?
+              AND ts >= ?
+            ORDER BY ts ASC
+            """,
+            (int(uid), _since_iso(hours)),
+        )
+        return [dict(r) for r in cur.fetchall()]
+    finally:
+        con.close()
+
+
+def add_feedback(name: str, profile: str, rating: int, comment: str) -> None:
+    con = _conn()
+    try:
+        con.execute(
+            """
+            INSERT INTO feedback (ts, name, profile, rating, comment)
+            VALUES (?, ?, ?, ?, ?)
+            """,
+            (datetime.now(timezone.utc).isoformat(), name, profile, int(rating), comment or ""),
+        )
+        con.commit()
+    finally:
+        con.close()
+
+
+def list_alerts(limit: int = 50) -> List[Dict[str, Any]]:
+    con = _conn()
+    try:
+        cur = con.execute(
+            """
+            SELECT ts, level, message
+            FROM alerts
+            ORDER BY ts DESC
+            LIMIT ?
+            """,
+            (int(limit),),
+        )
+        return [dict(r) for r in cur.fetchall()]
+    finally:
+        con.close()
+
+
+def get_metrics() -> Dict[str, Any]:
+    """
+    Minimal metrics implementation to keep your /metrics endpoint working.
+    """
+    con = _conn()
+    try:
+        cur = con.execute("SELECT COUNT(*) AS c FROM readings")
+        readings_count = int(cur.fetchone()["c"])
+
+        cur = con.execute("SELECT COUNT(*) AS c FROM tracked_locations")
+        tracked_count = int(cur.fetchone()["c"])
+
+        return {
+            "readings_count": readings_count,
+            "tracked_locations_count": tracked_count,
+            "db_path": DB_PATH,
+        }
+    finally:
+        con.close()

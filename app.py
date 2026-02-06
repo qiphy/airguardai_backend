@@ -1,6 +1,7 @@
 # app.py
 import os
 import time
+import asyncio
 from datetime import datetime, timezone
 from typing import Dict, Any, Tuple
 import requests
@@ -14,6 +15,9 @@ from storage import (
     init_db,
     record_reading,
     fetch_history,
+    fetch_history_by_uid,
+    track_location,
+    list_tracked_locations,
     add_feedback,
     list_alerts,
     get_metrics,
@@ -128,12 +132,26 @@ def resolve_input_to_sequence(user_input: str) -> Tuple[str, Dict[str, Any]]:
     )
 
 def is_bad_aqi_value(v: Any) -> bool:
-    # AQICN search sometimes returns "-" as aqi
     if v is None:
         return True
     if isinstance(v, str) and v.strip() == "-":
         return True
     return False
+
+def parse_uid_from_query(q: str) -> int | None:
+    """
+    If query is like '@1451', returns 1451.
+    Otherwise None.
+    """
+    if not q:
+        return None
+    t = q.strip()
+    if t.startswith("@"):
+        try:
+            return int(t[1:])
+        except Exception:
+            return None
+    return None
 
 
 # ---------------------------
@@ -196,7 +214,6 @@ def search_location(keyword: str = Query(..., min_length=2)):
 
     clean_results = []
     for r in results:
-        # Drop search results with "-" AQI (your request)
         if is_bad_aqi_value(r.get("aqi")):
             continue
 
@@ -209,6 +226,24 @@ def search_location(keyword: str = Query(..., min_length=2)):
             }
         )
     return {"results": clean_results}
+
+
+class TrackRequest(BaseModel):
+    uid: int
+    name: str
+
+@app.post("/track")
+def track(payload: TrackRequest):
+    uid = int(payload.uid)
+    if uid <= 0:
+        raise HTTPException(status_code=400, detail="uid is required")
+    name = (payload.name or "").strip() or f"@{uid}"
+    track_location(uid, name)
+    return {"ok": True, "tracked": {"uid": uid, "name": name}}
+
+@app.get("/tracked")
+def tracked():
+    return {"tracked": list_tracked_locations()}
 
 
 # ---------------------------------------------------------
@@ -252,26 +287,25 @@ def get_cached_or_fetch(location: str, lat: float = None, lng: float = None):
             if loc_cache["data"]:
                 print("WARN: Serving stale cache due to API failure.")
                 return loc_cache["data"]
-
             raise HTTPException(status_code=502, detail="External API failed to find station.")
 
         # 5. Update Cache & DB
         data["ts"] = datetime.now(timezone.utc).isoformat()
 
-        # Choose best human-friendly display name
         station_name = data.get("station")
         city_name = data.get("city")
-        display_location = station_name
-        if not display_location or display_location == "Unknown":
-            display_location = city_name or location
+        display_location = station_name or city_name or location
 
-        # expose for frontend convenience
         data["display_location"] = display_location
+
+        # If query is "@<uid>", store uid
+        uid = parse_uid_from_query(str(data.get("query") or api_query))
 
         try:
             record_reading(
                 {
                     "ts": data["ts"],
+                    "uid": uid,
                     "location": display_location,
                     "station": station_name,
                     "aqi": data.get("aqi"),
@@ -297,6 +331,54 @@ def latest(location: str = Query("Kuala Lumpur"), lat: float = None, lng: float 
 
 
 # ---------------------------
+# Background tracking (hourly)
+# ---------------------------
+
+async def tracking_loop():
+    while True:
+        try:
+            tracked = list_tracked_locations()  # [{"uid":..., "name":...}]
+            for t in tracked:
+                uid = int(t["uid"])
+                name = t.get("name") or f"@{uid}"
+
+                try:
+                    # stable fetch by uid
+                    data = fetch_aqicn(city=f"@{uid}")
+                    ts = datetime.now(timezone.utc).isoformat()
+
+                    station_name = data.get("station") or name
+                    display_location = station_name or name
+
+                    record_reading(
+                        {
+                            "ts": ts,
+                            "uid": uid,
+                            "location": display_location,
+                            "station": station_name,
+                            "aqi": data.get("aqi"),
+                            "pm25": data.get("pm25"),
+                            "pm10": data.get("pm10"),
+                            "o3": data.get("o3"),
+                            "co": data.get("co"),
+                            "no2": data.get("no2"),
+                            "so2": data.get("so2"),
+                        }
+                    )
+                except Exception as e:
+                    print(f"WARN: tracking failed for uid={uid} ({name}): {e}")
+
+        except Exception as e:
+            print(f"WARN: tracking_loop outer error: {e}")
+
+        await asyncio.sleep(3600)
+
+@app.on_event("startup")
+async def _startup():
+    asyncio.create_task(tracking_loop())
+
+
+# ---------------------------
 # Prediction
 # ---------------------------
 
@@ -314,7 +396,6 @@ def predict(payload: PredictRequest):
     if not isinstance(data, dict):
         raise HTTPException(status_code=500, detail="Internal Error: Invalid AQI data")
 
-    # FIRM OPTION: never None -> always numeric
     features = {
         "location": payload.location,
         "aqi": safe_float(data.get("aqi")),
@@ -329,7 +410,6 @@ def predict(payload: PredictRequest):
     try:
         env_pred = predict_risk(features)
     except Exception as e:
-        # Never 502 here; you still want virus similarity response
         env_pred = {"risk": "UNKNOWN", "confidence": 0.0, "error": str(e)}
 
     try:
@@ -357,8 +437,8 @@ def predict(payload: PredictRequest):
         "explanation": f"Risk calculated based on virus sequence and air quality in {payload.location}.",
     }
 
+
 class EnvRequest(BaseModel):
-    # Firm option: allow frontend to pass already-fetched values
     aqi: float = 0.0
     pm25: float = 0.0
     pm10: float = 0.0
@@ -366,17 +446,12 @@ class EnvRequest(BaseModel):
     co: float = 0.0
     no2: float = 0.0
     so2: float = 0.0
-
-    # Keep these OPTIONAL for backward compatibility only
     location: str = "Kuala Lumpur"
     lat: float | None = None
     lng: float | None = None
 
-
 @app.post("/predict_env")
 def predict_env(payload: EnvRequest):
-    # If caller provided AQI fields, DO NOT call AQICN.
-    # (This avoids multi-instance cache issues and "Unknown station" failures.)
     has_direct = any([
         payload.aqi != 0.0,
         payload.pm25 != 0.0,
@@ -403,7 +478,6 @@ def predict_env(payload: EnvRequest):
             "so2": safe_float(payload.so2),
         }
     else:
-        # Backward compat only (still try, but NEVER 502 the UI)
         try:
             data = get_cached_or_fetch(payload.location, payload.lat, payload.lng)
         except Exception as e:
@@ -448,10 +522,16 @@ def predict_env(payload: EnvRequest):
     }
 
 
-
 @app.get("/history")
-def history(location: str = Query("Kuala Lumpur"), hours: int = Query(24, ge=1, le=168)):
+def history(
+    hours: int = Query(24, ge=1, le=168),
+    uid: int | None = None,
+    location: str = Query("Kuala Lumpur"),
+):
+    if uid is not None:
+        return {"uid": uid, "hours": hours, "points": fetch_history_by_uid(uid, hours)}
     return {"location": location, "hours": hours, "points": fetch_history(location, hours)}
+
 
 class FeedbackIn(BaseModel):
     name: str = "Anonymous"
