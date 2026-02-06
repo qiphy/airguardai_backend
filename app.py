@@ -362,9 +362,25 @@ class EnvRequest(BaseModel):
 
 @app.post("/predict_env")
 def predict_env(payload: EnvRequest):
-    data = get_cached_or_fetch(payload.location)
+    try:
+        data = get_cached_or_fetch(payload.location)
+    except Exception as e:
+        # FIRM OPTION: never kill the UI due to AQICN failures
+        data = {
+            "ts": datetime.now(timezone.utc).isoformat(),
+            "aqi": 0,
+            "pm25": 0.0,
+            "pm10": 0.0,
+            "o3": 0.0,
+            "co": 0.0,
+            "no2": 0.0,
+            "so2": 0.0,
+            "city": payload.location,
+            "station": None,
+            "display_location": payload.location,
+            "error": str(e),
+        }
 
-    # FIRM OPTION: never None -> always numeric, so model won't crash on sparse stations
     features = {
         "location": payload.location,
         "aqi": safe_float(data.get("aqi")),
@@ -379,17 +395,19 @@ def predict_env(payload: EnvRequest):
     try:
         pred = predict_risk(features)
     except Exception as e:
-        # IMPORTANT: Do not 502 the UI. Return a stable response.
         pred = {"risk": "UNKNOWN", "confidence": 0.0, "error": str(e)}
 
     return {
         "ts": data.get("ts"),
         "location": payload.location,
-        "display_location": data.get("display_location") or payload.location,
+        "display_location": data.get("display_location") or data.get("city") or payload.location,
         "features_used": features,
         "prediction": pred,
         "explanation": f"Environment-only risk for {payload.location}.",
+        # optional: helps debugging without breaking UI
+        "aqicn_error": data.get("error"),
     }
+
 
 @app.get("/history")
 def history(location: str = Query("Kuala Lumpur"), hours: int = Query(24, ge=1, le=168)):
