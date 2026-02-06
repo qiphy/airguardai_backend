@@ -1,3 +1,4 @@
+# app.py
 import os
 import time
 from datetime import datetime, timezone
@@ -31,26 +32,16 @@ if not AQICN_TOKEN:
 
 CACHE_TTL_SECONDS = 600  # 10 minutes
 
-from fastapi.middleware.cors import CORSMiddleware
-from fastapi import Response
-
 app = FastAPI(title="AirGuard AI Backend")
 
-# ---- CORS (FIX FOR FLUTTER WEB POST /predict_env) ----
+# CORS Setup
 app.add_middleware(
     CORSMiddleware,
-    allow_origin_regex=".*",   # IMPORTANT for Flutter Web
+    allow_origins=["*"],
     allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
-    max_age=86400,
 )
-
-# Explicit OPTIONS handler (preflight safety net)
-@app.options("/{path:path}")
-def options_handler(path: str):
-    return Response(status_code=204)
-
 
 # Cache
 _cache: Dict[str, Dict[str, Any]] = {}
@@ -59,6 +50,15 @@ _cache: Dict[str, Dict[str, Any]] = {}
 # ---------------------------
 # Helpers
 # ---------------------------
+
+def safe_float(x: Any, default: float = 0.0) -> float:
+    """FIRM OPTION: always return a number; never None."""
+    try:
+        if x is None:
+            return default
+        return float(x)
+    except Exception:
+        return default
 
 def normalize_virus_name(s: str) -> str:
     x = (s or "").strip().lower()
@@ -106,9 +106,11 @@ def resolve_input_to_sequence(user_input: str) -> Tuple[str, Dict[str, Any]]:
     raw = (user_input or "").strip()
     if not raw:
         raise HTTPException(status_code=400, detail="protein_sequence is empty")
+
     norm = normalize_virus_name(raw)
     if norm in VIRUS_DB:
         return VIRUS_DB[norm], {"type": "virus_name", "mapped_from": raw, "normalized_key": norm}
+
     if looks_like_protein(raw) or raw.startswith(">") or "\n" in raw:
         seq = sanitize_protein_input(raw)
         if not seq:
@@ -125,22 +127,13 @@ def resolve_input_to_sequence(user_input: str) -> Tuple[str, Dict[str, Any]]:
         },
     )
 
-def _clean_location_keyword(s: str) -> str:
-    """
-    GPS strings sometimes look like:
-      "penang; Seberang Jaya 2, Perai, Pulau Pinang, Malaysia"
-    AQICN keyword search works better with short keywords like "penang" or "perai".
-    """
-    s = (s or "").strip()
-    if not s:
-        return s
-    # keep left side before semicolon (your UI uses "penang; ...")
-    if ";" in s:
-        s = s.split(";", 1)[0].strip()
-    # keep first chunk before comma (avoid full address)
-    if "," in s:
-        s = s.split(",", 1)[0].strip()
-    return s
+def is_bad_aqi_value(v: Any) -> bool:
+    # AQICN search sometimes returns "-" as aqi
+    if v is None:
+        return True
+    if isinstance(v, str) and v.strip() == "-":
+        return True
+    return False
 
 
 # ---------------------------
@@ -203,29 +196,19 @@ def search_location(keyword: str = Query(..., min_length=2)):
 
     clean_results = []
     for r in results:
+        # Drop search results with "-" AQI (your request)
+        if is_bad_aqi_value(r.get("aqi")):
+            continue
+
         station = r.get("station", {}) or {}
-        aqi_raw = r.get("aqi")
-
-        # Filter out missing AQI entries (AQICN uses "-" for no data)
-        if aqi_raw in (None, "-", ""):
-            continue
-        # Some rare cases: aqi might be non-numeric text
-        try:
-            aqi_val = int(float(str(aqi_raw)))
-        except Exception:
-            continue
-
-        clean_results.append({
-            "name": station.get("name", "Unknown"),
-            "uid": r.get("uid"),
-            "aqi": aqi_val,
-        })
-
-    # Optional: sort by best AQI first (lowest is better)
-    clean_results.sort(key=lambda x: x["aqi"])
-
+        clean_results.append(
+            {
+                "name": station.get("name", "Unknown"),
+                "uid": r.get("uid"),
+                "aqi": r.get("aqi"),
+            }
+        )
     return {"results": clean_results}
-
 
 
 # ---------------------------------------------------------
@@ -235,9 +218,8 @@ def search_location(keyword: str = Query(..., min_length=2)):
 def get_cached_or_fetch(location: str, lat: float = None, lng: float = None):
     now = time.time()
 
-    # 1) Determine query + cache key
+    # 1. Determine Query
     if lat is not None and lng is not None:
-        # AQICN geo syntax (rounded to 4 decimals for precision)
         api_query = f"geo:{round(lat, 4)};{round(lng, 4)}"
         cache_key = f"geo:{round(lat, 3)},{round(lng, 3)}"
     else:
@@ -249,7 +231,7 @@ def get_cached_or_fetch(location: str, lat: float = None, lng: float = None):
 
     loc_cache = _cache[cache_key]
 
-    # 2) Fetch if stale
+    # 2. Fetch if stale
     if loc_cache["data"] is None or (now - loc_cache["ts"]) > CACHE_TTL_SECONDS:
         data = None
         try:
@@ -257,52 +239,50 @@ def get_cached_or_fetch(location: str, lat: float = None, lng: float = None):
         except Exception as e:
             print(f"ERROR: fetch_aqicn error: {e}")
 
-        # 3) Fallback to name search (sanitize keyword)
+        # 3. Fallback to Name (only if geo failed)
         if (data is None) and (lat is not None) and location and (location != "Current Location"):
-            fallback_kw = _clean_location_keyword(location)
-            if fallback_kw:
-                print(f"WARN: Geo-lookup failed. Falling back to text search: '{fallback_kw}' (orig='{location}')")
-                try:
-                    data = fetch_aqicn(fallback_kw)
-                except Exception as e:
-                    print(f"ERROR: Fallback fetch failed: {e}")
+            print(f"WARN: Geo-lookup failed. Falling back to text: '{location}'")
+            try:
+                data = fetch_aqicn(location)
+            except Exception as e:
+                print(f"ERROR: Fallback fetch failed: {e}")
 
-        # 4) Validation
+        # 4. Validation
         if data is None or not isinstance(data, dict):
             if loc_cache["data"]:
                 print("WARN: Serving stale cache due to API failure.")
                 return loc_cache["data"]
 
-            raise HTTPException(
-                status_code=502,
-                detail="External API failed to find station.",
-            )
+            raise HTTPException(status_code=502, detail="External API failed to find station.")
 
-        # 5) Update cache & DB
+        # 5. Update Cache & DB
         data["ts"] = datetime.now(timezone.utc).isoformat()
 
-        # "display_location" is what your UI should show.
-        # Prefer station name; else city; else requested location.
-        display_location = data.get("station")
+        # Choose best human-friendly display name
+        station_name = data.get("station")
+        city_name = data.get("city")
+        display_location = station_name
         if not display_location or display_location == "Unknown":
-            display_location = data.get("city") or location
+            display_location = city_name or location
 
+        # expose for frontend convenience
         data["display_location"] = display_location
 
-        # IMPORTANT: store "location" in DB as the *requested key* so /history?location=... works.
         try:
-            record_reading({
-                "ts": data["ts"],
-                "location": location,            # stable lookup key for history
-                "station": data.get("station"),  # display detail
-                "aqi": data.get("aqi"),
-                "pm25": data.get("pm25"),
-                "pm10": data.get("pm10"),
-                "o3": data.get("o3"),
-                "co": data.get("co"),
-                "no2": data.get("no2"),
-                "so2": data.get("so2"),
-            })
+            record_reading(
+                {
+                    "ts": data["ts"],
+                    "location": display_location,
+                    "station": station_name,
+                    "aqi": data.get("aqi"),
+                    "pm25": data.get("pm25"),
+                    "pm10": data.get("pm10"),
+                    "o3": data.get("o3"),
+                    "co": data.get("co"),
+                    "no2": data.get("no2"),
+                    "so2": data.get("so2"),
+                }
+            )
         except Exception as e:
             print(f"WARN: DB write failed: {e}")
 
@@ -315,6 +295,10 @@ def get_cached_or_fetch(location: str, lat: float = None, lng: float = None):
 def latest(location: str = Query("Kuala Lumpur"), lat: float = None, lng: float = None):
     return get_cached_or_fetch(location, lat, lng)
 
+
+# ---------------------------
+# Prediction
+# ---------------------------
 
 class PredictRequest(BaseModel):
     protein_sequence: str
@@ -330,20 +314,23 @@ def predict(payload: PredictRequest):
     if not isinstance(data, dict):
         raise HTTPException(status_code=500, detail="Internal Error: Invalid AQI data")
 
+    # FIRM OPTION: never None -> always numeric
     features = {
         "location": payload.location,
-        "aqi": data.get("aqi"),
-        "pm25": data.get("pm25"),
-        "pm10": data.get("pm10"),
-        "o3": data.get("o3"),
-        "co": data.get("co"),
-        "no2": data.get("no2"),
-        "so2": data.get("so2"),
+        "aqi": safe_float(data.get("aqi")),
+        "pm25": safe_float(data.get("pm25")),
+        "pm10": safe_float(data.get("pm10")),
+        "o3": safe_float(data.get("o3")),
+        "co": safe_float(data.get("co")),
+        "no2": safe_float(data.get("no2")),
+        "so2": safe_float(data.get("so2")),
     }
 
-    env_pred = predict_risk(features)
-    if env_pred is None:
-        raise HTTPException(status_code=500, detail="Env model failed")
+    try:
+        env_pred = predict_risk(features)
+    except Exception as e:
+        # Never 502 here; you still want virus similarity response
+        env_pred = {"risk": "UNKNOWN", "confidence": 0.0, "error": str(e)}
 
     try:
         p_influenza_like = predict_influenza_like_protein(sequence_to_use)
@@ -351,14 +338,15 @@ def predict(payload: PredictRequest):
         raise HTTPException(status_code=400, detail=str(e))
 
     env_info = compute_env_multiplier(payload.location)
-    env_multiplier = env_info["env_multiplier"]
-    overall_risk = p_influenza_like * env_multiplier
+    env_multiplier = float(env_info["env_multiplier"])
+    overall_risk = float(p_influenza_like) * env_multiplier
 
     return {
         "ts": data.get("ts"),
         "location": payload.location,
+        "display_location": data.get("display_location") or payload.location,
         "input_info": input_info,
-        "virus_similarity": {"p_influenza_like": p_influenza_like},
+        "virus_similarity": {"p_influenza_like": float(p_influenza_like)},
         "environment": {
             "features_used": features,
             "env_prediction": env_pred,
@@ -369,28 +357,35 @@ def predict(payload: PredictRequest):
         "explanation": f"Risk calculated based on virus sequence and air quality in {payload.location}.",
     }
 
-
 class EnvRequest(BaseModel):
     location: str = "Kuala Lumpur"
 
 @app.post("/predict_env")
 def predict_env(payload: EnvRequest):
     data = get_cached_or_fetch(payload.location)
+
+    # FIRM OPTION: never None -> always numeric, so model won't crash on sparse stations
     features = {
         "location": payload.location,
-        "aqi": data.get("aqi"),
-        "pm25": data.get("pm25"),
-        "pm10": data.get("pm10"),
-        "o3": data.get("o3"),
-        "co": data.get("co"),
-        "no2": data.get("no2"),
-        "so2": data.get("so2"),
+        "aqi": safe_float(data.get("aqi")),
+        "pm25": safe_float(data.get("pm25")),
+        "pm10": safe_float(data.get("pm10")),
+        "o3": safe_float(data.get("o3")),
+        "co": safe_float(data.get("co")),
+        "no2": safe_float(data.get("no2")),
+        "so2": safe_float(data.get("so2")),
     }
 
-    pred = predict_risk(features)
+    try:
+        pred = predict_risk(features)
+    except Exception as e:
+        # IMPORTANT: Do not 502 the UI. Return a stable response.
+        pred = {"risk": "UNKNOWN", "confidence": 0.0, "error": str(e)}
+
     return {
         "ts": data.get("ts"),
         "location": payload.location,
+        "display_location": data.get("display_location") or payload.location,
         "features_used": features,
         "prediction": pred,
         "explanation": f"Environment-only risk for {payload.location}.",
@@ -399,7 +394,6 @@ def predict_env(payload: EnvRequest):
 @app.get("/history")
 def history(location: str = Query("Kuala Lumpur"), hours: int = Query(24, ge=1, le=168)):
     return {"location": location, "hours": hours, "points": fetch_history(location, hours)}
-
 
 class FeedbackIn(BaseModel):
     name: str = "Anonymous"
