@@ -31,16 +31,26 @@ if not AQICN_TOKEN:
 
 CACHE_TTL_SECONDS = 600  # 10 minutes
 
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi import Response
+
 app = FastAPI(title="AirGuard AI Backend")
 
-# CORS Setup
+# ---- CORS (FIX FOR FLUTTER WEB POST /predict_env) ----
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origin_regex=".*",   # IMPORTANT for Flutter Web
     allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
+    max_age=86400,
 )
+
+# Explicit OPTIONS handler (preflight safety net)
+@app.options("/{path:path}")
+def options_handler(path: str):
+    return Response(status_code=204)
+
 
 # Cache
 _cache: Dict[str, Dict[str, Any]] = {}
