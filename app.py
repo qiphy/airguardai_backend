@@ -32,10 +32,11 @@ CACHE_TTL_SECONDS = 600  # 10 minutes
 
 app = FastAPI(title="AirGuard AI Backend")
 
+# FIXED: CORS setup for broad compatibility
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
-    allow_credentials=True,
+    allow_credentials=False, # Must be False for wildcard '*' origin
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -195,7 +196,7 @@ def health():
 
 def get_cached_or_fetch(location: str):
     """
-    Robust cache retrieval that handles API failures gracefully.
+    Robust cache retrieval that handles API failures and bad return types gracefully.
     """
     now = time.time()
     
@@ -214,17 +215,20 @@ def get_cached_or_fetch(location: str):
             print(f"Error calling fetch_aqicn for {location}: {e}")
             data = None
 
-        # CRITICAL FIX: Handle API failure
-        if not data:
+        # CRITICAL FIX 1: Ensure data is not None
+        # CRITICAL FIX 2: Ensure data is actually a Dict (prevents 'str' object has no attribute 'get')
+        if not data or not isinstance(data, dict):
+            print(f"API returned invalid data for {location}: {data}")
+            
             # If we have old cache, return it (stale is better than crashing)
             if loc_cache["data"]:
-                print(f"API failed for {location}, serving stale cache.")
+                print("Serving stale cache.")
                 return loc_cache["data"]
             
             # If no cache and API failed, we must error out
             raise HTTPException(
                 status_code=502, 
-                detail=f"Unable to fetch air quality data for '{location}' and no cached data available."
+                detail=f"Unable to fetch air quality data for '{location}'. API returned: {data}"
             )
 
         # Proceed if data is valid
@@ -233,7 +237,7 @@ def get_cached_or_fetch(location: str):
         # Ensure the data returned actually has the location name, or fallback to requested
         actual_location = data.get("city", {}).get("name", location)
 
-        # FIXED: Wrap DB write in try/except so DB issues don't block the API response
+        # Wrap DB write in try/except so DB issues don't block the API response
         try:
             record_reading(
                 {
