@@ -241,7 +241,7 @@ def track(payload: TrackRequest):
     name = (payload.name or "").strip() or f"@{uid}"
     track_location(uid, name)
 
-    # ✅ record immediately so charts show up right after selection
+    # ✅ record immediately so chart shows without waiting
     try:
         data = fetch_aqicn(city=f"@{uid}")
         ts = datetime.now(timezone.utc).isoformat()
@@ -262,10 +262,10 @@ def track(payload: TrackRequest):
             "so2": data.get("so2"),
         })
     except Exception as e:
-        # don't fail tracking just because AQICN temporarily fails
-        print(f"WARN: immediate track fetch failed uid={uid}: {e}")
+        print(f"WARN: immediate record failed uid={uid}: {e}")
 
     return {"ok": True, "tracked": {"uid": uid, "name": name}}
+
 
 
 @app.get("/tracked")
