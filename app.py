@@ -358,39 +358,78 @@ def predict(payload: PredictRequest):
     }
 
 class EnvRequest(BaseModel):
+    # Firm option: allow frontend to pass already-fetched values
+    aqi: float = 0.0
+    pm25: float = 0.0
+    pm10: float = 0.0
+    o3: float = 0.0
+    co: float = 0.0
+    no2: float = 0.0
+    so2: float = 0.0
+
+    # Keep these OPTIONAL for backward compatibility only
     location: str = "Kuala Lumpur"
+    lat: float | None = None
+    lng: float | None = None
+
 
 @app.post("/predict_env")
 def predict_env(payload: EnvRequest):
-    try:
-        data = get_cached_or_fetch(payload.location)
-    except Exception as e:
-        # FIRM OPTION: never kill the UI due to AQICN failures
+    # If caller provided AQI fields, DO NOT call AQICN.
+    # (This avoids multi-instance cache issues and "Unknown station" failures.)
+    has_direct = any([
+        payload.aqi != 0.0,
+        payload.pm25 != 0.0,
+        payload.pm10 != 0.0,
+        payload.o3 != 0.0,
+        payload.co != 0.0,
+        payload.no2 != 0.0,
+        payload.so2 != 0.0,
+    ])
+
+    if has_direct:
         data = {
             "ts": datetime.now(timezone.utc).isoformat(),
-            "aqi": 0,
-            "pm25": 0.0,
-            "pm10": 0.0,
-            "o3": 0.0,
-            "co": 0.0,
-            "no2": 0.0,
-            "so2": 0.0,
-            "city": payload.location,
-            "station": None,
             "display_location": payload.location,
-            "error": str(e),
         }
+        features = {
+            "location": payload.location,
+            "aqi": safe_float(payload.aqi),
+            "pm25": safe_float(payload.pm25),
+            "pm10": safe_float(payload.pm10),
+            "o3": safe_float(payload.o3),
+            "co": safe_float(payload.co),
+            "no2": safe_float(payload.no2),
+            "so2": safe_float(payload.so2),
+        }
+    else:
+        # Backward compat only (still try, but NEVER 502 the UI)
+        try:
+            data = get_cached_or_fetch(payload.location, payload.lat, payload.lng)
+        except Exception as e:
+            data = {
+                "ts": datetime.now(timezone.utc).isoformat(),
+                "display_location": payload.location,
+                "error": str(e),
+                "aqi": 0,
+                "pm25": 0.0,
+                "pm10": 0.0,
+                "o3": 0.0,
+                "co": 0.0,
+                "no2": 0.0,
+                "so2": 0.0,
+            }
 
-    features = {
-        "location": payload.location,
-        "aqi": safe_float(data.get("aqi")),
-        "pm25": safe_float(data.get("pm25")),
-        "pm10": safe_float(data.get("pm10")),
-        "o3": safe_float(data.get("o3")),
-        "co": safe_float(data.get("co")),
-        "no2": safe_float(data.get("no2")),
-        "so2": safe_float(data.get("so2")),
-    }
+        features = {
+            "location": payload.location,
+            "aqi": safe_float(data.get("aqi")),
+            "pm25": safe_float(data.get("pm25")),
+            "pm10": safe_float(data.get("pm10")),
+            "o3": safe_float(data.get("o3")),
+            "co": safe_float(data.get("co")),
+            "no2": safe_float(data.get("no2")),
+            "so2": safe_float(data.get("so2")),
+        }
 
     try:
         pred = predict_risk(features)
@@ -400,13 +439,14 @@ def predict_env(payload: EnvRequest):
     return {
         "ts": data.get("ts"),
         "location": payload.location,
-        "display_location": data.get("display_location") or data.get("city") or payload.location,
+        "display_location": data.get("display_location") or payload.location,
         "features_used": features,
         "prediction": pred,
         "explanation": f"Environment-only risk for {payload.location}.",
-        # optional: helps debugging without breaking UI
         "aqicn_error": data.get("error"),
+        "used_direct_inputs": has_direct,
     }
+
 
 
 @app.get("/history")
