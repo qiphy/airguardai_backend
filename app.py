@@ -555,7 +555,20 @@ def history(hours: int = Query(24, ge=1, le=168), uid: int | None = None, locati
         return {"uid": uid, "hours": hours, "points": fetch_history_by_uid(uid, hours)}
     return {"location": location, "hours": hours, "points": fetch_history(location, hours)}
 
+class UntrackRequest(BaseModel):
+    uid: int
 
+@app.post("/untrack")
+def untrack(payload: UntrackRequest):
+    uid = int(payload.uid)
+    if uid <= 0:
+        raise HTTPException(status_code=400, detail="uid required")
+
+    from storage import delete_history_by_uid, untrack_location
+    delete_history_by_uid(uid)
+    untrack_location(uid)
+
+    return {"ok": True, "removed_uid": uid}
 
 class FeedbackIn(BaseModel):
     name: str = "Anonymous"

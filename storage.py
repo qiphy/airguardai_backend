@@ -218,6 +218,24 @@ def list_alerts(limit: int = 50) -> List[Dict[str, Any]]:
     finally:
         con.close()
 
+def delete_history_by_uid(uid: int) -> None:
+    con = _conn()
+    try:
+        con.execute("DELETE FROM readings WHERE uid = ?", (int(uid),))
+        con.commit()
+    finally:
+        con.close()
+
+
+def untrack_location(uid: int) -> None:
+    con = _conn()
+    try:
+        con.execute("DELETE FROM tracked_locations WHERE uid = ?", (int(uid),))
+        con.commit()
+    finally:
+        con.close()
+
+
 
 def get_metrics() -> Dict[str, Any]:
     """
