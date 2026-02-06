@@ -37,7 +37,9 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-_cache = {"ts": 0, "data": None}
+# CHANGED: Cache is now a dict of locations
+# Format: { "Kuala Lumpur": {"ts": 12345, "data": {...}}, "Ipoh": {...} }
+_cache: Dict[str, Dict[str, Any]] = {}
 
 
 # ---------------------------
@@ -71,54 +73,31 @@ def normalize_virus_name(s: str) -> str:
 
 
 def looks_like_protein(raw: str) -> bool:
-    """
-    Heuristic to decide whether the input is a protein sequence (or FASTA),
-    versus a virus name.
-
-    - FASTA headers / multiline -> sequence
-    - Spaces -> likely name
-    - Only allow standard 20 AAs (ACDEFGHIKLMNPQRSTVWY)
-    - Very short strings are treated as names
-    """
     if not raw:
         return False
-
     t = raw.strip()
     if not t:
         return False
-
-    # FASTA or multiline: treat as sequence (we'll sanitize elsewhere if needed)
+    # FASTA or multiline
     if t.startswith(">") or "\n" in t or "\r" in t:
         return True
-
-    # Names usually contain spaces, slashes, parentheses, etc.
+    # Names usually contain spaces
     if " " in t:
         return False
-
     upper = t.upper()
-
-    # Allow only letters to be considered a candidate sequence
     if not all("A" <= ch <= "Z" for ch in upper):
         return False
-
     # Standard 20 amino acids only
     aa = set("ACDEFGHIKLMNPQRSTVWY")
     if any(ch not in aa for ch in upper):
         return False
-
     # Too short is likely a label ("flu", "covid")
     if len(upper) < 25:
         return False
-
     return True
 
 
 def sanitize_protein_input(raw: str) -> str:
-    """
-    - Removes FASTA headers & whitespace
-    - Keeps letters only
-    - Uppercases
-    """
     lines = raw.splitlines()
     seq_parts = []
     for line in lines:
@@ -128,26 +107,16 @@ def sanitize_protein_input(raw: str) -> str:
         if t.startswith(">"):
             continue
         seq_parts.append(t)
-
     joined = "".join(seq_parts)
     cleaned = "".join(ch for ch in joined if ch.isalpha()).upper()
     return cleaned
 
 
 def resolve_input_to_sequence(user_input: str) -> Tuple[str, Dict[str, Any]]:
-    """
-    Returns (sequence_to_use, input_info)
-
-    Behavior:
-    - If input matches VIRUS_DB key after normalization -> map to stored sequence.
-    - Else, if it looks like a protein -> sanitize and use as protein.
-    - Else -> reject as unsupported virus name (prevents confusing model errors).
-    """
     raw = (user_input or "").strip()
     if not raw:
         raise HTTPException(status_code=400, detail="protein_sequence is empty")
 
-    # Try virus-name path first (normalized)
     norm = normalize_virus_name(raw)
     if norm in VIRUS_DB:
         return VIRUS_DB[norm], {
@@ -156,7 +125,6 @@ def resolve_input_to_sequence(user_input: str) -> Tuple[str, Dict[str, Any]]:
             "normalized_key": norm,
         }
 
-    # Then try protein path
     if looks_like_protein(raw) or raw.startswith(">") or "\n" in raw or "\r" in raw:
         seq = sanitize_protein_input(raw)
         if not seq:
@@ -167,7 +135,6 @@ def resolve_input_to_sequence(user_input: str) -> Tuple[str, Dict[str, Any]]:
             "normalized_key": None,
         }
 
-    # Otherwise it's a name we don't support
     supported = sorted(VIRUS_DB.keys())
     raise HTTPException(
         status_code=400,
@@ -184,9 +151,6 @@ def resolve_input_to_sequence(user_input: str) -> Tuple[str, Dict[str, Any]]:
 # ---------------------------
 
 def compute_env_multiplier(location: str = "Kuala Lumpur") -> dict:
-    """
-    Calculates a risk multiplier based on the last 7 days of air quality data.
-    """
     pts = fetch_history(location, 168)
     if not pts:
         return {"env_multiplier": 1.0, "basis": "no_history"}
@@ -227,18 +191,28 @@ def health():
     return {"ok": True}
 
 
-@app.get("/latest")
-def latest():
+# CHANGED: Helper function to get cached data for ANY location
+def get_cached_or_fetch(location: str):
     now = time.time()
+    
+    # Initialize cache for this location if it doesn't exist
+    if location not in _cache:
+        _cache[location] = {"ts": 0, "data": None}
+    
+    loc_cache = _cache[location]
 
-    if _cache["data"] is None or (now - _cache["ts"]) > CACHE_TTL_SECONDS:
-        data = fetch_aqicn()
+    if loc_cache["data"] is None or (now - loc_cache["ts"]) > CACHE_TTL_SECONDS:
+        # Pass location to your fetch function
+        data = fetch_aqicn(location) 
         data["ts"] = datetime.now(timezone.utc).isoformat()
+        
+        # Ensure the data returned actually has the location name, or fallback to requested
+        actual_location = data.get("city", {}).get("name", location)
 
         record_reading(
             {
                 "ts": data["ts"],
-                "location": "Kuala Lumpur",
+                "location": actual_location, # Use the actual location returned by API
                 "station": data.get("station"),
                 "aqi": data.get("aqi"),
                 "pm25": data.get("pm25"),
@@ -250,10 +224,16 @@ def latest():
             }
         )
 
-        _cache["data"] = data
-        _cache["ts"] = now
+        _cache[location]["data"] = data
+        _cache[location]["ts"] = now
 
-    return _cache["data"]
+    return _cache[location]["data"]
+
+
+# CHANGED: Endpoint now accepts location query param
+@app.get("/latest")
+def latest(location: str = Query("Kuala Lumpur")):
+    return get_cached_or_fetch(location)
 
 
 class PredictRequest(BaseModel):
@@ -263,18 +243,12 @@ class PredictRequest(BaseModel):
 
 @app.post("/predict")
 def predict(payload: PredictRequest):
-    # ---------------------------------------------------------
-    # STEP 1: Resolve input to a protein sequence
-    # ---------------------------------------------------------
+    # 1. Resolve Sequence
     user_input = (payload.protein_sequence or "").strip()
     sequence_to_use, input_info = resolve_input_to_sequence(user_input)
 
-    # ---------------------------------------------------------
-    # STEP 2: Get Air Quality Data
-    # ---------------------------------------------------------
-    data = _cache.get("data")
-    if data is None:
-        data = latest()
+    # 2. Get Air Quality Data (Using the helper for dynamic location)
+    data = get_cached_or_fetch(payload.location)
 
     if not isinstance(data, dict):
         raise HTTPException(status_code=500, detail="Latest AQI data is not available")
@@ -293,9 +267,7 @@ def predict(payload: PredictRequest):
     if features["aqi"] is None or features["pm25"] is None:
         raise HTTPException(status_code=400, detail=f"Missing fields for prediction: {features}")
 
-    # ---------------------------------------------------------
-    # STEP 3: Run Models
-    # ---------------------------------------------------------
+    # 3. Run Models
     env_pred = predict_risk(features)
     if env_pred is None:
         raise HTTPException(status_code=500, detail="Env model returned invalid prediction")
@@ -303,7 +275,6 @@ def predict(payload: PredictRequest):
     try:
         p_influenza_like = predict_influenza_like_protein(sequence_to_use)
     except ValueError as e:
-        # Keep as 400: user input issue (bad sequence)
         raise HTTPException(status_code=400, detail=str(e))
     except RuntimeError as e:
         raise HTTPException(status_code=500, detail=str(e))
@@ -326,20 +297,24 @@ def predict(payload: PredictRequest):
         },
         "overall_risk": overall_risk,
         "explanation": (
-            "Virus similarity is predicted from the submitted protein sequence (or a mapped virus name). "
-            "Air quality (AQI/PM2.5) modulates susceptibility via a multiplier."
+            "Virus similarity is predicted from the submitted protein sequence. "
+            f"Air quality context ({payload.location}) modulates susceptibility."
         ),
     }
 
 
+# CHANGED: New Pydantic model for Env-only prediction
+class EnvRequest(BaseModel):
+    location: str = "Kuala Lumpur"
+
+
 @app.post("/predict_env")
-def predict_env():
-    data = _cache.get("data")
-    if data is None:
-        data = latest()
+def predict_env(payload: EnvRequest):
+    # Use helper to get data for specific location
+    data = get_cached_or_fetch(payload.location)
 
     features = {
-        "location": "Kuala Lumpur",
+        "location": payload.location,
         "aqi": data.get("aqi"),
         "pm25": data.get("pm25"),
         "pm10": data.get("pm10"),
@@ -354,16 +329,17 @@ def predict_env():
     pred = predict_risk(features)
     return {
         "ts": data.get("ts"),
-        "location": "Kuala Lumpur",
+        "location": payload.location,
         "features_used": features,
         "prediction": pred,
-        "explanation": "Environment-only risk from AQI/PM2.5.",
+        "explanation": f"Environment-only risk from AQI/PM2.5 for {payload.location}.",
     }
 
 
 @app.get("/history")
-def history(hours: int = Query(24, ge=1, le=168)):
-    return {"location": "Kuala Lumpur", "hours": hours, "points": fetch_history("Kuala Lumpur", hours)}
+def history(location: str = Query("Kuala Lumpur"), hours: int = Query(24, ge=1, le=168)):
+    # Updated to accept location query as well
+    return {"location": location, "hours": hours, "points": fetch_history(location, hours)}
 
 
 class FeedbackIn(BaseModel):
