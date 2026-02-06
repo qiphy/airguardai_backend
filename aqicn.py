@@ -2,14 +2,16 @@ from __future__ import annotations
 
 import os
 from datetime import datetime
-from typing import Any, Dict, Optional, List
+from typing import Any, Dict, Optional
 
 import requests
 
 AQICN_BASE = "https://api.waqi.info"
 
+
 class AQICNError(RuntimeError):
     pass
+
 
 def _to_float(x: Any) -> Optional[float]:
     if x is None:
@@ -19,13 +21,19 @@ def _to_float(x: Any) -> Optional[float]:
     except Exception:
         return None
 
+
 def _get_iaqi_value(iaqi: Dict[str, Any], key: str) -> Optional[float]:
     obj = iaqi.get(key)
     if not isinstance(obj, dict):
         return None
     return _to_float(obj.get("v"))
 
-def _get_forecast_value(forecast: Dict[str, Any], key: str, target_date: str) -> Optional[float]:
+
+def _get_forecast_value(
+    forecast: Dict[str, Any],
+    key: str,
+    target_date: str,
+) -> Optional[float]:
     daily_data = forecast.get("daily", {}).get(key, [])
     if not isinstance(daily_data, list):
         return None
@@ -34,17 +42,26 @@ def _get_forecast_value(forecast: Dict[str, Any], key: str, target_date: str) ->
             return _to_float(entry.get("max"))
     return None
 
+
 def fetch_aqicn(
     city: str = "Kuala Lumpur",
     token: Optional[str] = None,
     timeout: int = 12,
 ) -> Dict[str, Any]:
+    """
+    Accepts:
+      - keyword: "Kuala Lumpur"
+      - geo: "geo:3.1;101.5"
+      - uid: "@12345" (from AQICN search)
+    Returns a FLAT dict:
+      - query: what you requested (keyword/geo/@uid)
+      - city: resolved name from AQICN (string) when available
+      - station: resolved station display name (string) when available
+    """
     token = token or os.getenv("AQICN_TOKEN")
     if not token:
-        # This error will be caught by app.py and shown in logs
         raise AQICNError("Missing AQICN_TOKEN environment variable.")
 
-    # Handles both "Kuala Lumpur" and "geo:3.1;101.5"
     url = f"{AQICN_BASE}/feed/{city}/"
     params = {"token": token}
 
@@ -63,52 +80,49 @@ def fetch_aqicn(
 
     status = raw.get("status")
     if status != "ok":
-        # Pass the message up so app.py can decide to fallback or fail
         raise AQICNError(f"AQICN status={status}, data={raw.get('data')}")
 
     d = raw.get("data") or {}
     iaqi = d.get("iaqi") or {}
     forecast = d.get("forecast") or {}
 
-    # 1. Determine Date for Forecast
-    api_time_str = d.get("time", {}).get("s", "")
+    # 1) Determine date for forecast fallback
+    api_time_str = (d.get("time") or {}).get("s", "")
     current_date_str = None
     if api_time_str:
         try:
-            current_date_str = api_time_str.split(" ")[0] 
+            current_date_str = api_time_str.split(" ")[0]
         except Exception:
             pass
     if not current_date_str:
         current_date_str = datetime.utcnow().strftime("%Y-%m-%d")
 
-    # 2. Extract Info
-    station = None
+    # 2) Extract resolved name(s)
     city_obj = d.get("city")
+    resolved_name = None
     if isinstance(city_obj, dict):
-        station = city_obj.get("name")
+        resolved_name = city_obj.get("name")
 
     aqi = _to_float(d.get("aqi"))
 
-    # 3. Helper: Realtime -> Forecast -> Default 0.0
     def get_val(pol_key: str) -> float:
         val = _get_iaqi_value(iaqi, pol_key)
         if val is None and current_date_str:
             val = _get_forecast_value(forecast, pol_key, current_date_str)
-        if val is None:
-            return 0.0
-        return val
+        return float(val) if val is not None else 0.0
 
     return {
+        "query": city,                 # requested keyword/geo/@uid
         "aqi": aqi,
-        "station": station,
-        "city": city,
+        "station": resolved_name,      # resolved display string when available
+        "city": resolved_name,         # keep flat string (NOT the input)
         "pm25": get_val("pm25"),
         "pm10": get_val("pm10"),
-        "o3":   get_val("o3"),
-        "co":   _get_iaqi_value(iaqi, "co") or 0.0,
-        "no2":  _get_iaqi_value(iaqi, "no2") or 0.0,
-        "so2":  _get_iaqi_value(iaqi, "so2") or 0.0,
-        "temp":     _get_iaqi_value(iaqi, "t"),
+        "o3": get_val("o3"),
+        "co": _get_iaqi_value(iaqi, "co") or 0.0,
+        "no2": _get_iaqi_value(iaqi, "no2") or 0.0,
+        "so2": _get_iaqi_value(iaqi, "so2") or 0.0,
+        "temp": _get_iaqi_value(iaqi, "t"),
         "humidity": _get_iaqi_value(iaqi, "h"),
-        "wind":     _get_iaqi_value(iaqi, "w"),
+        "wind": _get_iaqi_value(iaqi, "w"),
     }
