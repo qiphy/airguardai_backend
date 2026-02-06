@@ -42,12 +42,12 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Cache format: { "Kuala Lumpur": {"ts": 12345, "data": {...}}, "geo:3.1,101.5": {...} }
+# Cache
 _cache: Dict[str, Dict[str, Any]] = {}
 
 
 # ---------------------------
-# Helpers: normalization & detection
+# Helpers
 # ---------------------------
 
 def normalize_virus_name(s: str) -> str:
@@ -138,7 +138,6 @@ def compute_env_multiplier(location: str = "Kuala Lumpur") -> dict:
 def health():
     return {"ok": True}
 
-# Search helper function for autocomplete
 def search_aqicn(keyword: str) -> list:
     if not AQICN_TOKEN:
         return []
@@ -167,23 +166,20 @@ def search_location(keyword: str = Query(..., min_length=2)):
     return {"results": clean_results}
 
 # ---------------------------------------------------------
-# UPDATED: Robust Cache & Fetch Logic (Fixes Unknown Station)
+# CACHE LOGIC
 # ---------------------------------------------------------
 
 def get_cached_or_fetch(location: str, lat: float = None, lng: float = None):
     now = time.time()
     
-    # 1. Determine Query with Rounding (Fixes API precision error)
+    # 1. Determine Query
     if lat is not None and lng is not None:
-        # Round to 4 decimals max for API query
+        # AQICN geo syntax (rounded to 4 decimals for precision)
         api_query = f"geo:{round(lat, 4)};{round(lng, 4)}"
-        # Cache key rounded to 3 decimals to group nearby users
         cache_key = f"geo:{round(lat, 3)},{round(lng, 3)}"
     else:
         api_query = location
         cache_key = location
-
-    print(f"DEBUG: Processing request for {cache_key} (Query: {api_query})") 
 
     if cache_key not in _cache:
         _cache[cache_key] = {"ts": 0, "data": None}
@@ -194,14 +190,11 @@ def get_cached_or_fetch(location: str, lat: float = None, lng: float = None):
     if loc_cache["data"] is None or (now - loc_cache["ts"]) > CACHE_TTL_SECONDS:
         data = None
         try:
-            print(f"DEBUG: Fetching AQICN for {api_query}...")
             data = fetch_aqicn(api_query)
         except Exception as e:
             print(f"ERROR: fetch_aqicn error: {e}")
 
-        # 3. SMART FALLBACK
-        # If Geo-lookup failed (data is None) AND we have a valid city name, try the name.
-        # But ignore "Current Location" because that's not a city name.
+        # 3. Fallback to Name
         if (data is None) and (lat is not None) and location and (location != "Current Location"):
             print(f"WARN: Geo-lookup failed. Falling back to text search: '{location}'")
             try:
@@ -209,25 +202,26 @@ def get_cached_or_fetch(location: str, lat: float = None, lng: float = None):
             except Exception as e:
                 print(f"ERROR: Fallback fetch failed: {e}")
 
-        # 4. Final Validation
+        # 4. Validation
         if data is None or not isinstance(data, dict):
-            # If we have OLD cache, serve it (Better than crashing)
             if loc_cache["data"]:
                 print("WARN: Serving stale cache due to API failure.")
                 return loc_cache["data"]
             
-            # If no data at all, return 502
-            print(f"CRITICAL: API failed for {api_query} and no fallback available.")
             raise HTTPException(
                 status_code=502, 
-                detail="External API failed to find station for this location."
+                detail="External API failed to find station."
             )
 
-        # 5. Success - Update Cache & DB
+        # 5. Update Cache & DB
         data["ts"] = datetime.now(timezone.utc).isoformat()
         
-        # Use the real station name returned by API
-        actual_location = data.get("city", {}).get("name", location)
+        # --- FIXED LOGIC HERE ---
+        # The new aqicn.py returns a FLAT dictionary.
+        # station = "SK Jalan Pegoh", city = "Kuala Lumpur"
+        actual_location = data.get("station") 
+        if not actual_location or actual_location == "Unknown":
+             actual_location = data.get("city") or location
 
         try:
             record_reading({
@@ -263,11 +257,10 @@ def predict(payload: PredictRequest):
     user_input = (payload.protein_sequence or "").strip()
     sequence_to_use, input_info = resolve_input_to_sequence(user_input)
 
-    # Note: Predict doesn't usually carry coords, so we use location string
     data = get_cached_or_fetch(payload.location)
     
     if not isinstance(data, dict):
-        raise HTTPException(status_code=500, detail="Internal Error: Invalid AQI data structure")
+        raise HTTPException(status_code=500, detail="Internal Error: Invalid AQI data")
 
     features = {
         "location": payload.location,
@@ -279,9 +272,6 @@ def predict(payload: PredictRequest):
         "no2": data.get("no2"),
         "so2": data.get("so2"),
     }
-
-    if features["aqi"] is None or features["pm25"] is None:
-        pass # Allow models to handle missing data or defaults in predict_risk
 
     env_pred = predict_risk(features)
     if env_pred is None:
