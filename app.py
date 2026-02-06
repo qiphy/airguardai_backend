@@ -184,14 +184,32 @@ def get_cached_or_fetch(location: str):
     return loc_cache["data"]
 
 
+from fastapi import Query
+from datetime import datetime, timezone
+
 @app.get("/latest")
-def latest(location: str = Query("Kuala Lumpur")):
-    return get_cached_or_fetch(location)
+def latest(
+    location: str = Query("Kuala Lumpur"),
+    lat: float | None = None,
+    lng: float | None = None,
+):
+    try:
+        return get_cached_or_fetch(location, lat, lng)
+    except Exception as e:
+        # NEVER crash the browser fetch (prevents 500 + missing CORS)
+        return {
+            "ts": datetime.now(timezone.utc).isoformat(),
+            "display_location": location,
+            "error": str(e),
+            "aqi": 0,
+            "pm25": 0.0,
+            "pm10": 0.0,
+            "o3": 0.0,
+            "co": 0.0,
+            "no2": 0.0,
+            "so2": 0.0,
+        }
 
-
-# ---------------------------
-# History
-# ---------------------------
 
 @app.get("/history")
 def history(
