@@ -3,7 +3,7 @@ from __future__ import annotations
 import os
 import sqlite3
 from datetime import datetime, timedelta, timezone
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List
 
 DB_PATH = os.getenv("DB_PATH", "airguard.db")
 
@@ -85,11 +85,6 @@ def init_db() -> None:
 
 
 def record_reading(r: Dict[str, Any]) -> None:
-    """
-    Expected keys:
-      ts, location, station, aqi, pm25, pm10, o3, co, no2, so2
-      optional: uid (int)
-    """
     con = _conn()
     try:
         con.execute(
@@ -132,6 +127,24 @@ def track_location(uid: int, name: str) -> None:
         con.close()
 
 
+def untrack_location(uid: int) -> None:
+    con = _conn()
+    try:
+        con.execute("DELETE FROM tracked_locations WHERE uid = ?", (int(uid),))
+        con.commit()
+    finally:
+        con.close()
+
+
+def delete_history_by_uid(uid: int) -> None:
+    con = _conn()
+    try:
+        con.execute("DELETE FROM readings WHERE uid = ?", (int(uid),))
+        con.commit()
+    finally:
+        con.close()
+
+
 def list_tracked_locations() -> List[Dict[str, Any]]:
     con = _conn()
     try:
@@ -148,27 +161,6 @@ def _since_iso(hours: int) -> str:
     return since.isoformat()
 
 
-def fetch_history(location: str, hours: int) -> List[Dict[str, Any]]:
-    """
-    Backward-compatible: history by location string.
-    """
-    con = _conn()
-    try:
-        cur = con.execute(
-            """
-            SELECT ts, uid, location, station, aqi, pm25, pm10, o3, co, no2, so2
-            FROM readings
-            WHERE location = ?
-              AND ts >= ?
-            ORDER BY ts ASC
-            """,
-            (location, _since_iso(hours)),
-        )
-        return [dict(r) for r in cur.fetchall()]
-    finally:
-        con.close()
-
-
 def fetch_history_by_uid(uid: int, hours: int) -> List[Dict[str, Any]]:
     con = _conn()
     try:
@@ -181,6 +173,24 @@ def fetch_history_by_uid(uid: int, hours: int) -> List[Dict[str, Any]]:
             ORDER BY ts ASC
             """,
             (int(uid), _since_iso(hours)),
+        )
+        return [dict(r) for r in cur.fetchall()]
+    finally:
+        con.close()
+
+
+def fetch_history(location: str, hours: int) -> List[Dict[str, Any]]:
+    con = _conn()
+    try:
+        cur = con.execute(
+            """
+            SELECT ts, uid, location, station, aqi, pm25, pm10, o3, co, no2, so2
+            FROM readings
+            WHERE location = ?
+              AND ts >= ?
+            ORDER BY ts ASC
+            """,
+            (location, _since_iso(hours)),
         )
         return [dict(r) for r in cur.fetchall()]
     finally:
@@ -218,34 +228,12 @@ def list_alerts(limit: int = 50) -> List[Dict[str, Any]]:
     finally:
         con.close()
 
-def delete_history_by_uid(uid: int) -> None:
-    con = _conn()
-    try:
-        con.execute("DELETE FROM readings WHERE uid = ?", (int(uid),))
-        con.commit()
-    finally:
-        con.close()
-
-
-def untrack_location(uid: int) -> None:
-    con = _conn()
-    try:
-        con.execute("DELETE FROM tracked_locations WHERE uid = ?", (int(uid),))
-        con.commit()
-    finally:
-        con.close()
-
-
 
 def get_metrics() -> Dict[str, Any]:
-    """
-    Minimal metrics implementation to keep your /metrics endpoint working.
-    """
     con = _conn()
     try:
         cur = con.execute("SELECT COUNT(*) AS c FROM readings")
         readings_count = int(cur.fetchone()["c"])
-
         cur = con.execute("SELECT COUNT(*) AS c FROM tracked_locations")
         tracked_count = int(cur.fetchone()["c"])
 
