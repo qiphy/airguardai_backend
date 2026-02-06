@@ -200,15 +200,32 @@ def search_aqicn(keyword: str) -> list:
 @app.get("/search")
 def search_location(keyword: str = Query(..., min_length=2)):
     results = search_aqicn(keyword)
+
     clean_results = []
     for r in results:
-        station = r.get("station", {})
+        station = r.get("station", {}) or {}
+        aqi_raw = r.get("aqi")
+
+        # Filter out missing AQI entries (AQICN uses "-" for no data)
+        if aqi_raw in (None, "-", ""):
+            continue
+        # Some rare cases: aqi might be non-numeric text
+        try:
+            aqi_val = int(float(str(aqi_raw)))
+        except Exception:
+            continue
+
         clean_results.append({
             "name": station.get("name", "Unknown"),
             "uid": r.get("uid"),
-            "aqi": r.get("aqi")
+            "aqi": aqi_val,
         })
+
+    # Optional: sort by best AQI first (lowest is better)
+    clean_results.sort(key=lambda x: x["aqi"])
+
     return {"results": clean_results}
+
 
 
 # ---------------------------------------------------------
