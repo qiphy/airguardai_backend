@@ -237,9 +237,36 @@ def track(payload: TrackRequest):
     uid = int(payload.uid)
     if uid <= 0:
         raise HTTPException(status_code=400, detail="uid is required")
+
     name = (payload.name or "").strip() or f"@{uid}"
     track_location(uid, name)
+
+    # ✅ record immediately so charts show up right after selection
+    try:
+        data = fetch_aqicn(city=f"@{uid}")
+        ts = datetime.now(timezone.utc).isoformat()
+        station_name = data.get("station") or name
+        display_location = station_name or name
+
+        record_reading({
+            "ts": ts,
+            "uid": uid,
+            "location": display_location,
+            "station": station_name,
+            "aqi": data.get("aqi"),
+            "pm25": data.get("pm25"),
+            "pm10": data.get("pm10"),
+            "o3": data.get("o3"),
+            "co": data.get("co"),
+            "no2": data.get("no2"),
+            "so2": data.get("so2"),
+        })
+    except Exception as e:
+        # don't fail tracking just because AQICN temporarily fails
+        print(f"WARN: immediate track fetch failed uid={uid}: {e}")
+
     return {"ok": True, "tracked": {"uid": uid, "name": name}}
+
 
 @app.get("/tracked")
 def tracked():
@@ -523,14 +550,11 @@ def predict_env(payload: EnvRequest):
 
 
 @app.get("/history")
-def history(
-    hours: int = Query(24, ge=1, le=168),
-    uid: int | None = None,
-    location: str = Query("Kuala Lumpur"),
-):
+def history(hours: int = Query(24, ge=1, le=168), uid: int | None = None, location: str = "Kuala Lumpur"):
     if uid is not None:
         return {"uid": uid, "hours": hours, "points": fetch_history_by_uid(uid, hours)}
     return {"location": location, "hours": hours, "points": fetch_history(location, hours)}
+
 
 
 class FeedbackIn(BaseModel):
