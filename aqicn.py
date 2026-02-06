@@ -1,4 +1,3 @@
-# backend/aqicn.py
 from __future__ import annotations
 
 import os
@@ -45,6 +44,7 @@ def fetch_aqicn(
         # This error will be caught by app.py and shown in logs
         raise AQICNError("Missing AQICN_TOKEN environment variable.")
 
+    # Handles both "Kuala Lumpur" and "geo:3.1;101.5"
     url = f"{AQICN_BASE}/feed/{city}/"
     params = {"token": token}
 
@@ -63,6 +63,7 @@ def fetch_aqicn(
 
     status = raw.get("status")
     if status != "ok":
+        # Pass the message up so app.py can decide to fallback or fail
         raise AQICNError(f"AQICN status={status}, data={raw.get('data')}")
 
     d = raw.get("data") or {}

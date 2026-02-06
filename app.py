@@ -2,6 +2,7 @@ import os
 import time
 from datetime import datetime, timezone
 from typing import Optional, Dict, Any, Tuple
+import requests 
 
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
@@ -41,7 +42,7 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Cache format: { "Kuala Lumpur": {"ts": 12345, "data": {...}}, "Ipoh": {...} }
+# Cache format: { "Kuala Lumpur": {"ts": 12345, "data": {...}}, "geo:3.1,101.5": {...} }
 _cache: Dict[str, Dict[str, Any]] = {}
 
 
@@ -137,55 +138,97 @@ def compute_env_multiplier(location: str = "Kuala Lumpur") -> dict:
 def health():
     return {"ok": True}
 
-def get_cached_or_fetch(location: str):
-    """
-    Bulletproof cache retrieval.
-    """
+# Search helper function for autocomplete
+def search_aqicn(keyword: str) -> list:
+    if not AQICN_TOKEN:
+        return []
+    try:
+        url = f"https://api.waqi.info/search/?token={AQICN_TOKEN}&keyword={keyword}"
+        resp = requests.get(url, timeout=10)
+        if resp.status_code == 200:
+            data = resp.json()
+            if data.get("status") == "ok":
+                return data.get("data", [])
+    except Exception as e:
+        print(f"Search error: {e}")
+    return []
+
+@app.get("/search")
+def search_location(keyword: str = Query(..., min_length=2)):
+    results = search_aqicn(keyword)
+    clean_results = []
+    for r in results:
+        station = r.get("station", {})
+        clean_results.append({
+            "name": station.get("name", "Unknown"),
+            "uid": r.get("uid"),
+            "aqi": r.get("aqi")
+        })
+    return {"results": clean_results}
+
+# ---------------------------------------------------------
+# UPDATED: Robust Cache & Fetch Logic (Fixes Unknown Station)
+# ---------------------------------------------------------
+
+def get_cached_or_fetch(location: str, lat: float = None, lng: float = None):
     now = time.time()
-    print(f"DEBUG: Processing request for {location}") # DEBUG LOG
-
-    if location not in _cache:
-        _cache[location] = {"ts": 0, "data": None}
     
-    loc_cache = _cache[location]
+    # 1. Determine Query with Rounding (Fixes API precision error)
+    if lat is not None and lng is not None:
+        # Round to 4 decimals max for API query
+        api_query = f"geo:{round(lat, 4)};{round(lng, 4)}"
+        # Cache key rounded to 3 decimals to group nearby users
+        cache_key = f"geo:{round(lat, 3)},{round(lng, 3)}"
+    else:
+        api_query = location
+        cache_key = location
 
-    # If cache is empty or old, try to fetch
+    print(f"DEBUG: Processing request for {cache_key} (Query: {api_query})") 
+
+    if cache_key not in _cache:
+        _cache[cache_key] = {"ts": 0, "data": None}
+    
+    loc_cache = _cache[cache_key]
+
+    # 2. Fetch if stale
     if loc_cache["data"] is None or (now - loc_cache["ts"]) > CACHE_TTL_SECONDS:
-        print(f"DEBUG: Cache miss/stale for {location}. Fetching API...")
+        data = None
         try:
-            data = fetch_aqicn(location)
+            print(f"DEBUG: Fetching AQICN for {api_query}...")
+            data = fetch_aqicn(api_query)
         except Exception as e:
-            print(f"ERROR: fetch_aqicn threw exception: {e}")
-            data = None
+            print(f"ERROR: fetch_aqicn error: {e}")
 
-        # --- SAFETY CHECKS START ---
-        # 1. Is data None?
-        # 2. Is data NOT a dictionary? (e.g. string error message)
+        # 3. SMART FALLBACK
+        # If Geo-lookup failed (data is None) AND we have a valid city name, try the name.
+        # But ignore "Current Location" because that's not a city name.
+        if (data is None) and (lat is not None) and location and (location != "Current Location"):
+            print(f"WARN: Geo-lookup failed. Falling back to text search: '{location}'")
+            try:
+                data = fetch_aqicn(location)
+            except Exception as e:
+                print(f"ERROR: Fallback fetch failed: {e}")
+
+        # 4. Final Validation
         if data is None or not isinstance(data, dict):
-            print(f"ERROR: API returned invalid data type: {type(data)} -> {data}")
-            
-            # Fallback to stale cache if it exists
+            # If we have OLD cache, serve it (Better than crashing)
             if loc_cache["data"]:
                 print("WARN: Serving stale cache due to API failure.")
                 return loc_cache["data"]
             
-            # If no cache, we MUST fail safely (502 Bad Gateway)
+            # If no data at all, return 502
+            print(f"CRITICAL: API failed for {api_query} and no fallback available.")
             raise HTTPException(
                 status_code=502, 
-                detail=f"External API failed. Received: {str(data)[:100]}"
+                detail="External API failed to find station for this location."
             )
-        # --- SAFETY CHECKS END ---
 
-        # If we get here, 'data' is definitely a Dictionary.
+        # 5. Success - Update Cache & DB
         data["ts"] = datetime.now(timezone.utc).isoformat()
         
-        # Safely extract city name (Handle case where 'city' key is missing or not a dict)
-        actual_location = location
-        city_info = data.get("city")
-        if isinstance(city_info, dict):
-            actual_location = city_info.get("name", location)
+        # Use the real station name returned by API
+        actual_location = data.get("city", {}).get("name", location)
 
-        # Database recording (Protected)
         try:
             record_reading({
                 "ts": data["ts"],
@@ -202,14 +245,14 @@ def get_cached_or_fetch(location: str):
         except Exception as e:
             print(f"WARN: DB write failed: {e}")
 
-        _cache[location]["data"] = data
-        _cache[location]["ts"] = now
+        _cache[cache_key]["data"] = data
+        _cache[cache_key]["ts"] = now
 
-    return _cache[location]["data"]
+    return _cache[cache_key]["data"]
 
 @app.get("/latest")
-def latest(location: str = Query("Kuala Lumpur")):
-    return get_cached_or_fetch(location)
+def latest(location: str = Query("Kuala Lumpur"), lat: float = None, lng: float = None):
+    return get_cached_or_fetch(location, lat, lng)
 
 class PredictRequest(BaseModel):
     protein_sequence: str
@@ -220,9 +263,9 @@ def predict(payload: PredictRequest):
     user_input = (payload.protein_sequence or "").strip()
     sequence_to_use, input_info = resolve_input_to_sequence(user_input)
 
+    # Note: Predict doesn't usually carry coords, so we use location string
     data = get_cached_or_fetch(payload.location)
     
-    # Double check data is valid before using
     if not isinstance(data, dict):
         raise HTTPException(status_code=500, detail="Internal Error: Invalid AQI data structure")
 
@@ -238,7 +281,7 @@ def predict(payload: PredictRequest):
     }
 
     if features["aqi"] is None or features["pm25"] is None:
-        raise HTTPException(status_code=400, detail=f"Missing AQI/PM2.5 data for {payload.location}")
+        pass # Allow models to handle missing data or defaults in predict_risk
 
     env_pred = predict_risk(features)
     if env_pred is None:
@@ -284,9 +327,7 @@ def predict_env(payload: EnvRequest):
         "no2": data.get("no2"),
         "so2": data.get("so2"),
     }
-    if features["aqi"] is None or features["pm25"] is None:
-        raise HTTPException(status_code=400, detail=f"Missing AQI data for {payload.location}")
-
+    
     pred = predict_risk(features)
     return {
         "ts": data.get("ts"),
