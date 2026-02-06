@@ -25,6 +25,9 @@ from model import predict_risk
 init_db()
 
 AQICN_TOKEN = os.environ.get("AQICN_TOKEN", "")
+if not AQICN_TOKEN:
+    print("WARNING: AQICN_TOKEN is missing. External API calls will likely fail.")
+
 CACHE_TTL_SECONDS = 600  # 10 minutes
 
 app = FastAPI(title="AirGuard AI Backend")
@@ -37,8 +40,7 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# CHANGED: Cache is now a dict of locations
-# Format: { "Kuala Lumpur": {"ts": 12345, "data": {...}}, "Ipoh": {...} }
+# Cache format: { "Kuala Lumpur": {"ts": 12345, "data": {...}}, "Ipoh": {...} }
 _cache: Dict[str, Dict[str, Any]] = {}
 
 
@@ -191,8 +193,10 @@ def health():
     return {"ok": True}
 
 
-# CHANGED: Helper function to get cached data for ANY location
 def get_cached_or_fetch(location: str):
+    """
+    Robust cache retrieval that handles API failures gracefully.
+    """
     now = time.time()
     
     # Initialize cache for this location if it doesn't exist
@@ -201,28 +205,52 @@ def get_cached_or_fetch(location: str):
     
     loc_cache = _cache[location]
 
+    # Check if cache is stale or empty
     if loc_cache["data"] is None or (now - loc_cache["ts"]) > CACHE_TTL_SECONDS:
-        # Pass location to your fetch function
-        data = fetch_aqicn(location) 
+        try:
+            # Pass location to your fetch function
+            data = fetch_aqicn(location) 
+        except Exception as e:
+            print(f"Error calling fetch_aqicn for {location}: {e}")
+            data = None
+
+        # CRITICAL FIX: Handle API failure
+        if not data:
+            # If we have old cache, return it (stale is better than crashing)
+            if loc_cache["data"]:
+                print(f"API failed for {location}, serving stale cache.")
+                return loc_cache["data"]
+            
+            # If no cache and API failed, we must error out
+            raise HTTPException(
+                status_code=502, 
+                detail=f"Unable to fetch air quality data for '{location}' and no cached data available."
+            )
+
+        # Proceed if data is valid
         data["ts"] = datetime.now(timezone.utc).isoformat()
         
         # Ensure the data returned actually has the location name, or fallback to requested
         actual_location = data.get("city", {}).get("name", location)
 
-        record_reading(
-            {
-                "ts": data["ts"],
-                "location": actual_location, # Use the actual location returned by API
-                "station": data.get("station"),
-                "aqi": data.get("aqi"),
-                "pm25": data.get("pm25"),
-                "pm10": data.get("pm10"),
-                "o3": data.get("o3"),
-                "co": data.get("co"),
-                "no2": data.get("no2"),
-                "so2": data.get("so2"),
-            }
-        )
+        # FIXED: Wrap DB write in try/except so DB issues don't block the API response
+        try:
+            record_reading(
+                {
+                    "ts": data["ts"],
+                    "location": actual_location,
+                    "station": data.get("station"),
+                    "aqi": data.get("aqi"),
+                    "pm25": data.get("pm25"),
+                    "pm10": data.get("pm10"),
+                    "o3": data.get("o3"),
+                    "co": data.get("co"),
+                    "no2": data.get("no2"),
+                    "so2": data.get("so2"),
+                }
+            )
+        except Exception as e:
+            print(f"Warning: Failed to record reading to DB: {e}")
 
         _cache[location]["data"] = data
         _cache[location]["ts"] = now
@@ -230,7 +258,6 @@ def get_cached_or_fetch(location: str):
     return _cache[location]["data"]
 
 
-# CHANGED: Endpoint now accepts location query param
 @app.get("/latest")
 def latest(location: str = Query("Kuala Lumpur")):
     return get_cached_or_fetch(location)
@@ -303,7 +330,6 @@ def predict(payload: PredictRequest):
     }
 
 
-# CHANGED: New Pydantic model for Env-only prediction
 class EnvRequest(BaseModel):
     location: str = "Kuala Lumpur"
 
@@ -338,7 +364,6 @@ def predict_env(payload: EnvRequest):
 
 @app.get("/history")
 def history(location: str = Query("Kuala Lumpur"), hours: int = Query(24, ge=1, le=168)):
-    # Updated to accept location query as well
     return {"location": location, "hours": hours, "points": fetch_history(location, hours)}
 
 
