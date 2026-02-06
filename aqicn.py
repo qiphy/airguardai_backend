@@ -29,11 +29,7 @@ def _get_iaqi_value(iaqi: Dict[str, Any], key: str) -> Optional[float]:
     return _to_float(obj.get("v"))
 
 
-def _get_forecast_value(
-    forecast: Dict[str, Any],
-    key: str,
-    target_date: str,
-) -> Optional[float]:
+def _get_forecast_value(forecast: Dict[str, Any], key: str, target_date: str) -> Optional[float]:
     daily_data = forecast.get("daily", {}).get(key, [])
     if not isinstance(daily_data, list):
         return None
@@ -48,21 +44,12 @@ def fetch_aqicn(
     token: Optional[str] = None,
     timeout: int = 12,
 ) -> Dict[str, Any]:
-    """
-    Accepts:
-      - keyword: "Kuala Lumpur"
-      - geo: "geo:3.1;101.5"
-      - uid: "@12345" (from AQICN search)
-    Returns a FLAT dict:
-      - query: what you requested (keyword/geo/@uid)
-      - city: resolved name from AQICN (string) when available
-      - station: resolved station display name (string) when available
-    """
     token = token or os.getenv("AQICN_TOKEN")
     if not token:
         raise AQICNError("Missing AQICN_TOKEN environment variable.")
 
-    url = f"{AQICN_BASE}/feed/{city}/"
+    query = city  # keep original query (can be "@1451" or "geo:..")
+    url = f"{AQICN_BASE}/feed/{query}/"
     params = {"token": token}
 
     try:
@@ -86,8 +73,8 @@ def fetch_aqicn(
     iaqi = d.get("iaqi") or {}
     forecast = d.get("forecast") or {}
 
-    # 1) Determine date for forecast fallback
-    api_time_str = (d.get("time") or {}).get("s", "")
+    # date for forecast lookup
+    api_time_str = d.get("time", {}).get("s", "")
     current_date_str = None
     if api_time_str:
         try:
@@ -97,11 +84,11 @@ def fetch_aqicn(
     if not current_date_str:
         current_date_str = datetime.utcnow().strftime("%Y-%m-%d")
 
-    # 2) Extract resolved name(s)
+    # Resolve station/city name from AQICN payload
+    station_name = None
     city_obj = d.get("city")
-    resolved_name = None
     if isinstance(city_obj, dict):
-        resolved_name = city_obj.get("name")
+        station_name = city_obj.get("name")
 
     aqi = _to_float(d.get("aqi"))
 
@@ -112,10 +99,12 @@ def fetch_aqicn(
         return float(val) if val is not None else 0.0
 
     return {
-        "query": city,                 # requested keyword/geo/@uid
         "aqi": aqi,
-        "station": resolved_name,      # resolved display string when available
-        "city": resolved_name,         # keep flat string (NOT the input)
+        "station": station_name,
+        # IMPORTANT: "city" now becomes the RESOLVED readable name (not the query)
+        "city": station_name or query,
+        # keep original query too
+        "query": query,
         "pm25": get_val("pm25"),
         "pm10": get_val("pm10"),
         "o3": get_val("o3"),
