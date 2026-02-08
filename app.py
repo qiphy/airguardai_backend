@@ -55,17 +55,16 @@ app = FastAPI(title="AirGuard AI Backend")
 # Virus Prediction (/predict)  ✅ ADD THIS
 # ---------------------------
 
+# --- add near your other models ---
 class PredictPayload(BaseModel):
-    # same key you already use everywhere
     location: str = "Kuala Lumpur"
-
-    # one of these must be provided:
+    lat: float | None = None
+    lng: float | None = None
     virus_name: Optional[str] = None
     protein_sequence: Optional[str] = None
 
 
 def _clean_protein(seq: str) -> str:
-    # Allow FASTA headers, newlines, whitespace. Keep amino letters only.
     lines = seq.splitlines()
     out = []
     for line in lines:
@@ -73,9 +72,9 @@ def _clean_protein(seq: str) -> str:
         if not t or t.startswith(">"):
             continue
         out.append(t.upper())
-
     joined = "".join(out)
-    joined = "".join([c for c in joined if c in set("ACDEFGHIKLMNPQRSTVWY")])
+    allowed = set("ACDEFGHIKLMNPQRSTVWY")
+    joined = "".join([c for c in joined if c in allowed])
     return joined
 
 
@@ -83,78 +82,83 @@ def _clean_protein(seq: str) -> str:
 def predict(payload: PredictPayload):
     location = (payload.location or "Kuala Lumpur").strip() or "Kuala Lumpur"
 
-    # -------- Name mode --------
-    if payload.virus_name and payload.virus_name.strip():
-        key = payload.virus_name.strip().lower()  # ✅ FIX: normalize case
+    # 1) Get environmental features (this is your "formula inputs")
+    try:
+        latest = get_cached_or_fetch(location, payload.lat, payload.lng)
+    except Exception as e:
+        latest = _fallback_latest(location, str(e))
 
+    features = {
+        "location": location,
+        "aqi": safe_float(latest.get("aqi")),
+        "pm25": safe_float(latest.get("pm25")),
+        "pm10": safe_float(latest.get("pm10")),
+        "o3": safe_float(latest.get("o3")),
+        "co": safe_float(latest.get("co")),
+        "no2": safe_float(latest.get("no2")),
+        "so2": safe_float(latest.get("so2")),
+    }
+
+    # 2) Resolve virus input (name -> sequence OR protein directly)
+    virus_key = None
+    protein = None
+
+    if payload.virus_name and payload.virus_name.strip():
         if not VIRUS_DB:
             raise HTTPException(status_code=500, detail="VIRUS_DB not available on server")
 
-        if key not in VIRUS_DB:
+        virus_key = payload.virus_name.strip().lower()
+        if virus_key not in VIRUS_DB:
             raise HTTPException(status_code=404, detail="Not Found")
 
-        # If you have a model, you can still run it; otherwise return a simple match
-        return {
-            "ts": datetime.now(timezone.utc).isoformat(),
-            "location": location,
-            "input_type": "virus_name",
-            "virus_key": key,
-            "top_viruses": [{"name": key, "score": 1.0}],
-        }
+        protein = _clean_protein(VIRUS_DB[virus_key])
 
-    # -------- Protein mode --------
-    if payload.protein_sequence and payload.protein_sequence.strip():
-        cleaned = _clean_protein(payload.protein_sequence)
-        if len(cleaned) < 25:
+    elif payload.protein_sequence and payload.protein_sequence.strip():
+        protein = _clean_protein(payload.protein_sequence)
+        if len(protein) < 25:
             raise HTTPException(status_code=400, detail="protein_sequence too short")
+        virus_key = "protein_input"
 
-        if predict_influenza_like_protein is None:
-            # fallback: exact match against VIRUS_DB sequences if available
-            if not VIRUS_DB:
-                raise HTTPException(status_code=500, detail="virus model not available and VIRUS_DB missing")
+    else:
+        raise HTTPException(status_code=400, detail="Provide virus_name or protein_sequence")
 
-            # exact match (clean both sides)
-            matches = []
-            for k, seq in VIRUS_DB.items():
-                if _clean_protein(seq) == cleaned:
-                    matches.append({"name": k, "score": 1.0})
-
-            if not matches:
-                raise HTTPException(status_code=404, detail="Not Found")
-
-            return {
-                "ts": datetime.now(timezone.utc).isoformat(),
-                "location": location,
-                "input_type": "protein_sequence",
-                "top_viruses": matches[:5],
-                "note": "virus_model unavailable; used exact-match fallback",
-            }
-
-        # Use your actual model
+    # 3) Virus “likelihood” (optional model)
+    top_viruses = []
+    if predict_influenza_like_protein is not None:
         try:
-            result = predict_influenza_like_protein(cleaned)
-            # result can be dict or list depending on your implementation
-            if isinstance(result, dict):
-                return {
-                    "ts": datetime.now(timezone.utc).isoformat(),
-                    "location": location,
-                    "input_type": "protein_sequence",
-                    **result,
-                }
-            else:
-                return {
-                    "ts": datetime.now(timezone.utc).isoformat(),
-                    "location": location,
-                    "input_type": "protein_sequence",
-                    "top_viruses": result,
-                }
-        except HTTPException:
-            raise
+            out = predict_influenza_like_protein(protein)
+            # normalize outputs
+            if isinstance(out, dict) and "top_viruses" in out:
+                top_viruses = out["top_viruses"]
+            elif isinstance(out, list):
+                top_viruses = out
         except Exception as e:
-            raise HTTPException(status_code=500, detail=str(e))
+            top_viruses = [{"name": virus_key, "score": 1.0, "error": str(e)}]
+    else:
+        # fallback: just echo the resolved key
+        top_viruses = [{"name": virus_key, "score": 1.0}]
 
-    # -------- Neither provided --------
-    raise HTTPException(status_code=400, detail="Provide virus_name or protein_sequence")
+    # 4) Risk prediction (THIS is what your UI expects)
+    if predict_risk is None:
+        pred = {"risk": "UNKNOWN", "confidence": 0.0, "error": "predict_risk() not available on server"}
+    else:
+        try:
+            pred = predict_risk(features)
+        except Exception as e:
+            pred = {"risk": "UNKNOWN", "confidence": 0.0, "error": str(e)}
+
+    return {
+        "ts": datetime.now(timezone.utc).isoformat(),
+        "location": location,
+        "display_location": latest.get("display_location") or location,
+        "input_type": "virus_name" if payload.virus_name else "protein_sequence",
+        "virus_key": virus_key,
+        "features_used": features,
+        "prediction": pred,           # <- risk + confidence here
+        "top_viruses": top_viruses,
+        "aqicn_error": latest.get("error"),
+    }
+
 
 
 # ✅ CORS (fixes Flutter Web)
