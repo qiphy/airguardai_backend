@@ -300,7 +300,7 @@ class EnvRequest(BaseModel):
     lat: float | None = None
     lng: float | None = None
 
-@app.post("/predict_env")
+@app.post("/predict")
 def predict_env(payload: EnvRequest):
     has_direct = any([
         payload.aqi != 0.0,
