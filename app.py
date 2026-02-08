@@ -51,6 +51,112 @@ _cache: Dict[str, Dict[str, Any]] = {}
 
 app = FastAPI(title="AirGuard AI Backend")
 
+# ---------------------------
+# Virus Prediction (/predict)  ✅ ADD THIS
+# ---------------------------
+
+class PredictPayload(BaseModel):
+    # same key you already use everywhere
+    location: str = "Kuala Lumpur"
+
+    # one of these must be provided:
+    virus_name: Optional[str] = None
+    protein_sequence: Optional[str] = None
+
+
+def _clean_protein(seq: str) -> str:
+    # Allow FASTA headers, newlines, whitespace. Keep amino letters only.
+    lines = seq.splitlines()
+    out = []
+    for line in lines:
+        t = line.strip()
+        if not t or t.startswith(">"):
+            continue
+        out.append(t.upper())
+
+    joined = "".join(out)
+    joined = "".join([c for c in joined if c in set("ACDEFGHIKLMNPQRSTVWY")])
+    return joined
+
+
+@app.post("/predict")
+def predict(payload: PredictPayload):
+    location = (payload.location or "Kuala Lumpur").strip() or "Kuala Lumpur"
+
+    # -------- Name mode --------
+    if payload.virus_name and payload.virus_name.strip():
+        key = payload.virus_name.strip().lower()  # ✅ FIX: normalize case
+
+        if not VIRUS_DB:
+            raise HTTPException(status_code=500, detail="VIRUS_DB not available on server")
+
+        if key not in VIRUS_DB:
+            raise HTTPException(status_code=404, detail="Not Found")
+
+        # If you have a model, you can still run it; otherwise return a simple match
+        return {
+            "ts": datetime.now(timezone.utc).isoformat(),
+            "location": location,
+            "input_type": "virus_name",
+            "virus_key": key,
+            "top_viruses": [{"name": key, "score": 1.0}],
+        }
+
+    # -------- Protein mode --------
+    if payload.protein_sequence and payload.protein_sequence.strip():
+        cleaned = _clean_protein(payload.protein_sequence)
+        if len(cleaned) < 25:
+            raise HTTPException(status_code=400, detail="protein_sequence too short")
+
+        if predict_influenza_like_protein is None:
+            # fallback: exact match against VIRUS_DB sequences if available
+            if not VIRUS_DB:
+                raise HTTPException(status_code=500, detail="virus model not available and VIRUS_DB missing")
+
+            # exact match (clean both sides)
+            matches = []
+            for k, seq in VIRUS_DB.items():
+                if _clean_protein(seq) == cleaned:
+                    matches.append({"name": k, "score": 1.0})
+
+            if not matches:
+                raise HTTPException(status_code=404, detail="Not Found")
+
+            return {
+                "ts": datetime.now(timezone.utc).isoformat(),
+                "location": location,
+                "input_type": "protein_sequence",
+                "top_viruses": matches[:5],
+                "note": "virus_model unavailable; used exact-match fallback",
+            }
+
+        # Use your actual model
+        try:
+            result = predict_influenza_like_protein(cleaned)
+            # result can be dict or list depending on your implementation
+            if isinstance(result, dict):
+                return {
+                    "ts": datetime.now(timezone.utc).isoformat(),
+                    "location": location,
+                    "input_type": "protein_sequence",
+                    **result,
+                }
+            else:
+                return {
+                    "ts": datetime.now(timezone.utc).isoformat(),
+                    "location": location,
+                    "input_type": "protein_sequence",
+                    "top_viruses": result,
+                }
+        except HTTPException:
+            raise
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=str(e))
+
+    # -------- Neither provided --------
+    raise HTTPException(status_code=400, detail="Provide virus_name or protein_sequence")
+
+
 # ✅ CORS (fixes Flutter Web)
 app.add_middleware(
     CORSMiddleware,
@@ -300,7 +406,7 @@ class EnvRequest(BaseModel):
     lat: float | None = None
     lng: float | None = None
 
-@app.post("/predict")
+@app.post("/predict_env")
 def predict_env(payload: EnvRequest):
     has_direct = any([
         payload.aqi != 0.0,
