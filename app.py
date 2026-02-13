@@ -2,6 +2,7 @@
 import os
 import time
 import asyncio
+import io
 from datetime import datetime, timezone
 from typing import Dict, Any, Optional
 
@@ -9,6 +10,16 @@ import requests
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
+
+# -------- Biopython Imports for NCBI --------
+try:
+    from Bio import Entrez, SeqIO
+    # START CONFIG: Set your email for NCBI (Required by their API)
+    Entrez.email = os.environ.get("NCBI_EMAIL", "kuanqi04@gmail.com")
+    HAS_BIOPYTHON = True
+except ImportError:
+    HAS_BIOPYTHON = False
+    print("WARNING: Biopython not installed. NCBI fallback will be disabled.")
 
 # -------- Local modules --------
 from storage import (
@@ -52,19 +63,63 @@ _cache: Dict[str, Dict[str, Any]] = {}
 app = FastAPI(title="AirGuard AI Backend")
 
 # ---------------------------
-# Virus Prediction (/predict)  ✅ ADD THIS
+# NCBI Helper Function
+# ---------------------------
+def fetch_ncbi_protein(term: str) -> str:
+    """
+    Searches NCBI 'protein' db for the term, fetches the top result,
+    and returns the raw sequence string.
+    """
+    if not HAS_BIOPYTHON:
+        raise Exception("Biopython not installed on server")
+
+    print(f"NCBI: Searching for '{term}'...")
+    
+    # 1. Search for ID
+    try:
+        search_handle = Entrez.esearch(db="protein", term=term, retmax=1)
+        search_results = Entrez.read(search_handle)
+        search_handle.close()
+    except Exception as e:
+        print(f"NCBI Search Failed: {e}")
+        return ""
+
+    id_list = search_results.get('IdList', [])
+    if not id_list:
+        return ""
+
+    target_id = id_list[0]
+    print(f"NCBI: Found ID {target_id}, fetching...")
+
+    # 2. Fetch Data (FASTA format is easiest to parse for pure sequence)
+    try:
+        fetch_handle = Entrez.efetch(db="protein", id=target_id, rettype="fasta", retmode="text")
+        data = fetch_handle.read()
+        fetch_handle.close()
+
+        # Parse FASTA string using StringIO to simulate a file
+        seq_record = SeqIO.read(io.StringIO(data), "fasta")
+        return str(seq_record.seq)
+    except Exception as e:
+        print(f"NCBI Fetch Failed: {e}")
+        return ""
+
+
+# ---------------------------
+# Virus Prediction (/predict)
 # ---------------------------
 
-# --- add near your other models ---
 class PredictPayload(BaseModel):
     location: str = "Kuala Lumpur"
     lat: float | None = None
     lng: float | None = None
     virus_name: Optional[str] = None
     protein_sequence: Optional[str] = None
+    use_ncbi: bool = True  # New flag to allow toggling NCBI fallback
 
 
 def _clean_protein(seq: str) -> str:
+    # Basic cleanup
     lines = seq.splitlines()
     out = []
     for line in lines:
@@ -73,6 +128,7 @@ def _clean_protein(seq: str) -> str:
             continue
         out.append(t.upper())
     joined = "".join(out)
+    # Filter valid amino acids
     allowed = set("ACDEFGHIKLMNPQRSTVWY")
     joined = "".join([c for c in joined if c in allowed])
     return joined
@@ -82,7 +138,7 @@ def _clean_protein(seq: str) -> str:
 def predict(payload: PredictPayload):
     location = (payload.location or "Kuala Lumpur").strip() or "Kuala Lumpur"
 
-    # 1) Get environmental features (this is your "formula inputs")
+    # 1) Get environmental features
     try:
         latest = get_cached_or_fetch(location, payload.lat, payload.lng)
     except Exception as e:
@@ -99,35 +155,50 @@ def predict(payload: PredictPayload):
         "so2": safe_float(latest.get("so2")),
     }
 
-    # 2) Resolve virus input (name -> sequence OR protein directly)
+    # 2) Resolve virus input
     virus_key = None
     protein = None
+    source = "unknown"
 
-    if payload.virus_name and payload.virus_name.strip():
-        if not VIRUS_DB:
-            raise HTTPException(status_code=500, detail="VIRUS_DB not available on server")
-
-        virus_key = payload.virus_name.strip().lower()
-        if virus_key not in VIRUS_DB:
-            raise HTTPException(status_code=404, detail="Not Found")
-
-        protein = _clean_protein(VIRUS_DB[virus_key])
-
-    elif payload.protein_sequence and payload.protein_sequence.strip():
+    # Case A: Direct Sequence Provided
+    if payload.protein_sequence and payload.protein_sequence.strip():
         protein = _clean_protein(payload.protein_sequence)
-        if len(protein) < 25:
+        if len(protein) < 10:
             raise HTTPException(status_code=400, detail="protein_sequence too short")
-        virus_key = "protein_input"
+        virus_key = "custom_input"
+        source = "user_input"
+
+    # Case B: Virus Name Provided
+    elif payload.virus_name and payload.virus_name.strip():
+        virus_key = payload.virus_name.strip().lower()
+
+        # B1: Check Local DB
+        if VIRUS_DB and virus_key in VIRUS_DB:
+            protein = _clean_protein(VIRUS_DB[virus_key])
+            source = "local_db"
+        
+        # B2: Check NCBI (Fallback)
+        elif payload.use_ncbi and HAS_BIOPYTHON:
+            try:
+                raw_seq = fetch_ncbi_protein(payload.virus_name)
+                if raw_seq:
+                    protein = _clean_protein(raw_seq)
+                    source = "ncbi_api"
+            except Exception as e:
+                print(f"NCBI error: {e}")
+                # Don't crash, just let it fail below if protein is still None
+        
+        if not protein:
+            raise HTTPException(status_code=404, detail=f"Virus '{payload.virus_name}' not found in local DB or NCBI.")
 
     else:
         raise HTTPException(status_code=400, detail="Provide virus_name or protein_sequence")
 
-    # 3) Virus “likelihood” (optional model)
+    # 3) Virus “likelihood”
     top_viruses = []
     if predict_influenza_like_protein is not None:
         try:
             out = predict_influenza_like_protein(protein)
-            # normalize outputs
             if isinstance(out, dict) and "top_viruses" in out:
                 top_viruses = out["top_viruses"]
             elif isinstance(out, list):
@@ -135,12 +206,11 @@ def predict(payload: PredictPayload):
         except Exception as e:
             top_viruses = [{"name": virus_key, "score": 1.0, "error": str(e)}]
     else:
-        # fallback: just echo the resolved key
-        top_viruses = [{"name": virus_key, "score": 1.0}]
+        top_viruses = [{"name": virus_key, "score": 1.0, "note": "Model not loaded"}]
 
-    # 4) Risk prediction (THIS is what your UI expects)
+    # 4) Risk prediction
     if predict_risk is None:
-        pred = {"risk": "UNKNOWN", "confidence": 0.0, "error": "predict_risk() not available on server"}
+        pred = {"risk": "UNKNOWN", "confidence": 0.0, "error": "predict_risk() not available"}
     else:
         try:
             pred = predict_risk(features)
@@ -153,15 +223,15 @@ def predict(payload: PredictPayload):
         "display_location": latest.get("display_location") or location,
         "input_type": "virus_name" if payload.virus_name else "protein_sequence",
         "virus_key": virus_key,
+        "data_source": source,  # local_db, ncbi_api, or user_input
         "features_used": features,
-        "prediction": pred,           # <- risk + confidence here
+        "prediction": pred,
         "top_viruses": top_viruses,
         "aqicn_error": latest.get("error"),
     }
 
 
-
-# ✅ CORS (fixes Flutter Web)
+# ✅ CORS
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[
@@ -171,7 +241,7 @@ app.add_middleware(
         "http://localhost:8080",
         "http://localhost:5500",
     ],
-    allow_credentials=False,  # MUST be False if you ever use "*"
+    allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
     expose_headers=["*"],
@@ -201,7 +271,6 @@ def is_bad_aqi_value(v: Any) -> bool:
 
 
 def search_aqicn(keyword: str) -> list:
-    # Use AQICN search endpoint
     token = AQICN_TOKEN or os.environ.get("AQICN_TOKEN", "")
     if not token:
         return []
@@ -218,12 +287,6 @@ def search_aqicn(keyword: str) -> list:
 
 
 def get_cached_or_fetch(location: str, lat: float = None, lng: float = None) -> Dict[str, Any]:
-    """
-    Fetch AQICN with caching.
-    Supports either:
-      - location text (station/city)
-      - geo: lat/lng
-    """
     now = time.time()
 
     if lat is not None and lng is not None:
@@ -253,7 +316,6 @@ def get_cached_or_fetch(location: str, lat: float = None, lng: float = None) -> 
 
 
 def _fallback_latest(location: str, err: str) -> Dict[str, Any]:
-    # Never 500 to the browser
     return {
         "ts": datetime.now(timezone.utc).isoformat(),
         "display_location": location,
@@ -280,7 +342,6 @@ def health():
 @app.get("/search")
 def search_location(keyword: str = Query(..., min_length=2)):
     results = search_aqicn(keyword)
-
     clean = []
     for r in results:
         if is_bad_aqi_value(r.get("aqi")):
@@ -302,7 +363,6 @@ def latest(
     lat: float | None = None,
     lng: float | None = None,
 ):
-    # ✅ Never crash -> prevents 500 + missing CORS
     try:
         return get_cached_or_fetch(location, lat, lng)
     except Exception as e:
@@ -310,7 +370,7 @@ def latest(
 
 
 # ---------------------------
-# Track / Untrack (UID-based)
+# Track / Untrack
 # ---------------------------
 
 class TrackRequest(BaseModel):
@@ -322,35 +382,28 @@ def track(payload: TrackRequest):
     uid = int(payload.uid)
     if uid <= 0:
         raise HTTPException(status_code=400, detail="uid is required")
-
     name = (payload.name or "").strip() or f"@{uid}"
-
-    # save tracked
     track_location(uid, name)
-
-    # ✅ record immediately so Trends has points right away
+    
+    # Record immediate point
     try:
         data = fetch_aqicn(city=f"@{uid}")
         ts = datetime.now(timezone.utc).isoformat()
-
         station_name = data.get("station") or name
         display_location = station_name or name
-
-        record_reading(
-            {
-                "ts": ts,
-                "uid": uid,
-                "location": display_location,
-                "station": station_name,
-                "aqi": data.get("aqi"),
-                "pm25": data.get("pm25"),
-                "pm10": data.get("pm10"),
-                "o3": data.get("o3"),
-                "co": data.get("co"),
-                "no2": data.get("no2"),
-                "so2": data.get("so2"),
-            }
-        )
+        record_reading({
+            "ts": ts,
+            "uid": uid,
+            "location": display_location,
+            "station": station_name,
+            "aqi": data.get("aqi"),
+            "pm25": data.get("pm25"),
+            "pm10": data.get("pm10"),
+            "o3": data.get("o3"),
+            "co": data.get("co"),
+            "no2": data.get("no2"),
+            "so2": data.get("so2"),
+        })
     except Exception as e:
         print(f"WARN: /track immediate record failed uid={uid}: {e}")
 
@@ -365,7 +418,6 @@ def untrack(payload: UntrackRequest):
     uid = int(payload.uid)
     if uid <= 0:
         raise HTTPException(status_code=400, detail="uid is required")
-
     delete_history_by_uid(uid)
     untrack_location(uid)
     return {"ok": True, "removed_uid": uid}
@@ -392,11 +444,10 @@ def history(
 
 
 # ---------------------------
-# Env prediction (so Flutter won't 404)
+# Env prediction
 # ---------------------------
 
 class EnvRequest(BaseModel):
-    # Direct inputs (preferred)
     aqi: float = 0.0
     pm25: float = 0.0
     pm10: float = 0.0
@@ -404,8 +455,6 @@ class EnvRequest(BaseModel):
     co: float = 0.0
     no2: float = 0.0
     so2: float = 0.0
-
-    # optional fallback lookup
     location: str = "Kuala Lumpur"
     lat: float | None = None
     lng: float | None = None
@@ -423,10 +472,7 @@ def predict_env(payload: EnvRequest):
     ])
 
     if has_direct:
-        data = {
-            "ts": datetime.now(timezone.utc).isoformat(),
-            "display_location": payload.location,
-        }
+        data = {"ts": datetime.now(timezone.utc).isoformat(), "display_location": payload.location}
         features = {
             "location": payload.location,
             "aqi": safe_float(payload.aqi),
@@ -455,7 +501,7 @@ def predict_env(payload: EnvRequest):
         }
 
     if predict_risk is None:
-        pred = {"risk": "UNKNOWN", "confidence": 0.0, "error": "predict_risk() not available on server"}
+        pred = {"risk": "UNKNOWN", "confidence": 0.0, "error": "predict_risk() not available"}
     else:
         try:
             pred = predict_risk(features)
@@ -474,7 +520,7 @@ def predict_env(payload: EnvRequest):
 
 
 # ---------------------------
-# Optional: background hourly tracker (keeps history growing)
+# Background Loop
 # ---------------------------
 
 async def tracking_loop():
@@ -487,30 +533,25 @@ async def tracking_loop():
                 try:
                     data = fetch_aqicn(city=f"@{uid}")
                     ts = datetime.now(timezone.utc).isoformat()
-
                     station_name = data.get("station") or name
                     display_location = station_name or name
-
-                    record_reading(
-                        {
-                            "ts": ts,
-                            "uid": uid,
-                            "location": display_location,
-                            "station": station_name,
-                            "aqi": data.get("aqi"),
-                            "pm25": data.get("pm25"),
-                            "pm10": data.get("pm10"),
-                            "o3": data.get("o3"),
-                            "co": data.get("co"),
-                            "no2": data.get("no2"),
-                            "so2": data.get("so2"),
-                        }
-                    )
+                    record_reading({
+                        "ts": ts,
+                        "uid": uid,
+                        "location": display_location,
+                        "station": station_name,
+                        "aqi": data.get("aqi"),
+                        "pm25": data.get("pm25"),
+                        "pm10": data.get("pm10"),
+                        "o3": data.get("o3"),
+                        "co": data.get("co"),
+                        "no2": data.get("no2"),
+                        "so2": data.get("so2"),
+                    })
                 except Exception as e:
                     print(f"WARN: tracking_loop failed uid={uid}: {e}")
         except Exception as e:
             print(f"WARN: tracking_loop outer error: {e}")
-
         await asyncio.sleep(3600)
 
 
@@ -520,7 +561,7 @@ async def _startup():
 
 
 # ---------------------------
-# Existing misc endpoints
+# Feedback / Metrics
 # ---------------------------
 
 class FeedbackIn(BaseModel):
