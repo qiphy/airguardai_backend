@@ -175,7 +175,7 @@ def _clean_protein(seq: str) -> str:
     return joined
 
 
-@app.post("/predict")
+@app.post("/predict_env")
 def predict(payload: PredictPayload):
     location = (payload.location or "Unknown").strip() or "Unknown"
 
