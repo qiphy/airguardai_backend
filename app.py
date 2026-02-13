@@ -18,7 +18,7 @@ try:
     # 1. Email is ALWAYS required by NCBI
     Entrez.email = os.environ.get("NCBI_EMAIL", "kuanqi04@gmail.com")
     
-    # 2. API Key (Optional but recommended for higher limits)
+    # 2. API Key
     api_key = os.environ.get("NCBI_API_KEY")
     if api_key:
         Entrez.api_key = api_key
@@ -56,6 +56,16 @@ try:
 except Exception:
     predict_influenza_like_protein = None
     VIRUS_DB = {}
+
+# -------- Restored Virus Database --------
+COMMON_VIRUSES = [
+    "Influenza A virus", "Influenza B virus", "SARS-CoV-2", "Dengue virus",
+    "Zika virus", "Ebola virus", "Hepatitis B virus", "Hepatitis C virus",
+    "Human immunodeficiency virus 1", "Herpes simplex virus 1", "Measles virus",
+    "Rabies lyssavirus", "West Nile virus", "Yellow fever virus",
+    "Rotavirus A", "Norovirus", "Human papillomavirus", "Chikungunya virus",
+    "Plasmodium falciparum", "Mycobacterium tuberculosis"
+]
 
 # -------- Init --------
 init_db()
@@ -121,7 +131,6 @@ def _clean_protein(seq: str) -> str:
 def predict(payload: PredictPayload):
     location = (payload.location or "Kuala Lumpur").strip() or "Kuala Lumpur"
 
-    # 1) Get environmental features
     try:
         latest = get_cached_or_fetch(location, payload.lat, payload.lng)
     except Exception as e:
@@ -138,7 +147,6 @@ def predict(payload: PredictPayload):
         "so2": safe_float(latest.get("so2")),
     }
 
-    # 2) Resolve virus input
     virus_key = None
     protein = None
     source = "unknown"
@@ -163,9 +171,8 @@ def predict(payload: PredictPayload):
     else:
         raise HTTPException(status_code=400, detail="Provide virus_name or protein_sequence")
 
-    # 3) Virus “likelihood” score
     top_viruses = []
-    virus_score = 0.5 # Default middle-ground
+    virus_score = 0.5 
     if predict_influenza_like_protein is not None:
         try:
             out = predict_influenza_like_protein(protein)
@@ -176,7 +183,6 @@ def predict(payload: PredictPayload):
         except Exception:
             pass
 
-    # 4) Environmental Risk prediction
     if predict_risk is None:
         pred = {"risk": "UNKNOWN", "confidence": 0.0}
     else:
@@ -185,14 +191,10 @@ def predict(payload: PredictPayload):
         except Exception as e:
             pred = {"risk": "UNKNOWN", "confidence": 0.0, "error": str(e)}
 
-    # 5) BLENDED LOGIC (The "Pathogen Accelerator" Math)
-    # 60% weight to Air Transport, 40% weight to Virus Bio-Stability
     blended_confidence = (pred["confidence"] * 0.6) + (virus_score * 0.4)
     
-    # Adaptive Risk Labeling
     final_risk = pred["risk"]
     if virus_score > 0.8 and final_risk == "LOW":
-        # If virus is extremely high-risk, it bumps the floor to MEDIUM
         final_risk = "MEDIUM"
 
     return {
@@ -212,7 +214,7 @@ def predict(payload: PredictPayload):
         "aqicn_error": latest.get("error"),
     }
 
-# -------- Rest of API Routes --------
+# -------- API Config --------
 
 app.add_middleware(
     CORSMiddleware,
@@ -278,7 +280,6 @@ def untrack(payload: dict):
 
 @app.get("/suggest")
 def suggest(query: str = Query(..., min_length=2)):
-    # Quick static list + search logic
     q = query.lower()
     return {"suggestions": [v for v in COMMON_VIRUSES if q in v.lower()][:5]}
 
@@ -330,10 +331,6 @@ class EnvRequest(BaseModel):
 
 @app.post("/predict_env")
 def predict_env(payload: EnvRequest):
-    """
-    Restored endpoint for purely environmental risk assessment 
-    without requiring a virus protein sequence.
-    """
     has_direct = any([
         payload.aqi != 0.0,
         payload.pm25 != 0.0,
