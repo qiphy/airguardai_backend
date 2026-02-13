@@ -428,6 +428,32 @@ def untrack(payload: UntrackRequest):
     untrack_location(uid)
     return {"ok": True, "removed_uid": uid}
 
+@app.get("/suggest")
+def suggest(query: str = Query(..., min_length=2)):
+    """
+    Proxies NCBI's Clinical Tables API for fast organism/virus name autocomplete.
+    """
+    try:
+        # 'organism' database is perfect for virus names
+        url = f"https://clinicaltables.nlm.nih.gov/api/organism/v3/search"
+        params = {
+            "terms": query,
+            "maxList": 7,  # limit suggestions
+            "df": "species" # distinct names
+        }
+        resp = requests.get(url, params=params, timeout=2)
+        
+        if resp.status_code == 200:
+            # API returns: [total_count, codes, null, [ "Name 1", "Name 2" ]]
+            data = resp.json()
+            if len(data) >= 4:
+                return {"suggestions": data[3]}
+                
+    except Exception as e:
+        print(f"Autocomplete Error: {e}")
+        
+    return {"suggestions": []}
+
 
 @app.get("/tracked")
 def tracked():
