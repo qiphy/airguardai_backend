@@ -14,8 +14,16 @@ from pydantic import BaseModel
 # -------- Biopython Imports for NCBI --------
 try:
     from Bio import Entrez, SeqIO
-    # START CONFIG: Set your email for NCBI (Required by their API)
+    
+    # 1. Email is ALWAYS required by NCBI
     Entrez.email = os.environ.get("NCBI_EMAIL", "kuanqi04@gmail.com")
+    
+    # 2. API Key (Optional but recommended for higher limits)
+    # Get this from https://www.ncbi.nlm.nih.gov/account/settings/
+    api_key = os.environ.get("NCBI_API_KEY")
+    if api_key:
+        Entrez.api_key = api_key
+        
     HAS_BIOPYTHON = True
 except ImportError:
     HAS_BIOPYTHON = False
@@ -115,11 +123,10 @@ class PredictPayload(BaseModel):
     lng: float | None = None
     virus_name: Optional[str] = None
     protein_sequence: Optional[str] = None
-    use_ncbi: bool = True  # New flag to allow toggling NCBI fallback
+    use_ncbi: bool = True  # Flag to allow toggling NCBI fallback
 
 
 def _clean_protein(seq: str) -> str:
-    # Basic cleanup
     lines = seq.splitlines()
     out = []
     for line in lines:
@@ -128,7 +135,6 @@ def _clean_protein(seq: str) -> str:
             continue
         out.append(t.upper())
     joined = "".join(out)
-    # Filter valid amino acids
     allowed = set("ACDEFGHIKLMNPQRSTVWY")
     joined = "".join([c for c in joined if c in allowed])
     return joined
