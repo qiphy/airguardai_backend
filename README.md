@@ -3,7 +3,7 @@
 This backend runs locally using **FastAPI** and provides:
 
 - `GET /health` – service health check
-- `GET /latest` – fetches (and caches) Kuala Lumpur AQICN data
+- `GET /latest` – fetches (and caches) Unknown AQICN data
 - `POST /predict` – runs a local scikit-learn model on the latest readings
 
 ## 1) Setup
