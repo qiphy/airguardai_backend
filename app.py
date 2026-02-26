@@ -363,6 +363,10 @@ def alerts(): return {"alerts": list_alerts(50)}
 # Env prediction (RESTORED)
 # ---------------------------
 
+# ---------------------------
+# Env prediction (UPDATED)
+# ---------------------------
+
 class EnvRequest(BaseModel):
     aqi: float = 0.0
     pm25: float = 0.0
@@ -371,12 +375,16 @@ class EnvRequest(BaseModel):
     co: float = 0.0
     no2: float = 0.0
     so2: float = 0.0
+    # Added new fields
+    temp: float | None = None
+    humidity: float | None = None
     location: str = "Kuala Lumpur"
     lat: float | None = None
     lng: float | None = None
 
 @app.post("/predict_env")
 def predict_env(payload: EnvRequest):
+    # Check if any direct air quality or weather data was provided
     has_direct = any([
         payload.aqi != 0.0,
         payload.pm25 != 0.0,
@@ -385,6 +393,8 @@ def predict_env(payload: EnvRequest):
         payload.co != 0.0,
         payload.no2 != 0.0,
         payload.so2 != 0.0,
+        payload.temp is not None,
+        payload.humidity is not None,
     ])
 
     if has_direct:
@@ -398,6 +408,9 @@ def predict_env(payload: EnvRequest):
             "co": safe_float(payload.co),
             "no2": safe_float(payload.no2),
             "so2": safe_float(payload.so2),
+            # Pass through temperature and humidity
+            "temperature": payload.temp,
+            "humidity": payload.humidity,
         }
     else:
         try:
@@ -405,6 +418,7 @@ def predict_env(payload: EnvRequest):
         except Exception as e:
             data = _fallback_latest(payload.location, str(e))
 
+        # When fetching from AQICN, check if they provide 't' (temp) or 'h' (humidity)
         features = {
             "location": payload.location,
             "aqi": safe_float(data.get("aqi")),
@@ -414,12 +428,15 @@ def predict_env(payload: EnvRequest):
             "co": safe_float(data.get("co")),
             "no2": safe_float(data.get("no2")),
             "so2": safe_float(data.get("so2")),
+            "temperature": safe_float(data.get("t"), None),
+            "humidity": safe_float(data.get("h"), None),
         }
 
     if predict_risk is None:
         pred = {"risk": "UNKNOWN", "confidence": 0.0, "error": "predict_risk() not available"}
     else:
         try:
+            # The model now receives the enriched features dict
             pred = predict_risk(features)
         except Exception as e:
             pred = {"risk": "UNKNOWN", "confidence": 0.0, "error": str(e)}
