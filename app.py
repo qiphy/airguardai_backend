@@ -127,6 +127,52 @@ def _clean_protein(seq: str) -> str:
     allowed = set("ACDEFGHIKLMNPQRSTVWY")
     return "".join([c for c in joined if c in allowed])
 
+# --- Add this to your app.py ---
+
+class LocalInsightRequest(BaseModel):
+    virus_name: str
+    location: str
+
+@app.post("/local_insight")
+async def local_insight(payload: LocalInsightRequest):
+    try:
+        # 1. Get current environmental data for the location
+        try:
+            env_data = get_cached_or_fetch(payload.location)
+        except:
+            env_data = {"aqi": 0, "pm25": 0}
+
+        # 2. Determine Risk Level using your existing model
+        risk_level = "UNKNOWN"
+        if predict_risk:
+            features = {
+                "location": payload.location,
+                "aqi": safe_float(env_data.get("aqi")),
+                "pm25": safe_float(env_data.get("pm25")),
+                "pm10": safe_float(env_data.get("pm10")),
+                "o3": safe_float(env_data.get("o3")),
+                "co": safe_float(env_data.get("co")),
+                "no2": safe_float(env_data.get("no2")),
+                "so2": safe_float(env_data.get("so2")),
+            }
+            res = predict_risk(features)
+            risk_level = res.get("risk", "MEDIUM")
+
+        # 3. Construct a friendly response based on data
+        # This mimics the format your Flutter UI expects
+        insight_text = f"""### 🚨 Risk: {risk_level}
+* **Stay Informed:** Keep an eye on local health reports for {payload.virus_name} in {payload.location}.
+* **Air Quality:** The current AQI is {env_data.get('aqi', 'N/A')}. Poor air can weaken your respiratory defenses.
+* **Precaution:** Maintain good hygiene and consider wearing a mask in crowded indoor areas."""
+
+        return {"insight": insight_text}
+
+    except Exception as e:
+        # Ultimate fallback if everything fails
+        return {
+            "insight": "### 🚨 Risk: UNKNOWN\n* Service is currently in offline mode.\n* Please maintain standard safety protocols.\n* Wash hands frequently."
+        }
+
 @app.post("/predict")
 def predict(payload: PredictPayload):
     location = (payload.location or "Kuala Lumpur").strip() or "Kuala Lumpur"
