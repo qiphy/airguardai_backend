@@ -133,6 +133,65 @@ class LocalInsightRequest(BaseModel):
     virus_name: str
     location: str
 
+# --- Updated Pydantic Model for Gemini ---
+class GeminiRequest(BaseModel):
+    prompt: str
+    system_context: Optional[str] = "You are an expert in air quality and health."
+
+# --- NEW: WAQI Proxy Route ---
+@app.get("/waqi/feed")
+def proxy_waqi_feed(path: str = Query(...)):
+    """
+    Hides the AQICN_TOKEN. Flutter calls this instead of calling 
+    api.waqi.info directly.
+    """
+    token = os.environ.get("AQICN_TOKEN")
+    if not token:
+        raise HTTPException(status_code=500, detail="AQICN_TOKEN missing on server")
+        
+    url = f"https://api.waqi.info/feed/{path}/?token={token}"
+    try:
+        resp = requests.get(url, timeout=10)
+        return resp.json()
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+# --- NEW: Gemini REST Route (Lightweight) ---
+@app.post("/gemini/chat")
+async def gemini_chat(payload: GeminiRequest):
+    """
+    Uses direct HTTP POST to Google. 
+    Prevents Render RAM crashes caused by the 'google-generativeai' library.
+    """
+    api_key = os.environ.get("GEMINI_KEY")
+    if not api_key:
+        raise HTTPException(status_code=500, detail="GEMINI_KEY missing on server")
+
+    # REST Endpoint for Gemini 2.5 Flash
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key={api_key}"
+    
+    headers = {'Content-Type': 'application/json'}
+    payload_data = {
+        "contents": [
+            {
+                "role": "user",
+                "parts": [{"text": f"{payload.system_context}\n\nQuestion: {payload.prompt}"}]
+            }
+        ]
+    }
+
+    try:
+        response = requests.post(url, headers=headers, json=payload_data, timeout=30)
+        response.raise_for_status()
+        result = response.json()
+        
+        # Extract the text from the nested JSON response
+        answer = result['candidates'][0]['content']['parts'][0]['text']
+        return {"text": answer}
+    except Exception as e:
+        print(f"Gemini Error: {e}")
+        raise HTTPException(status_code=500, detail="Gemini API communication failed")
+
 @app.post("/local_insight")
 async def local_insight(payload: LocalInsightRequest):
     try:
