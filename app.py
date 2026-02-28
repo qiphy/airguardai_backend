@@ -11,6 +11,17 @@ from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
+app = FastAPI(title="AirGuard AI Backend")
+
+# This must come BEFORE your routes
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],  # Allows all origins (fine for university projects/dev)
+    allow_credentials=True,
+    allow_methods=["*"],  # Allows all methods (GET, POST, etc.)
+    allow_headers=["*"],  # Allows all headers
+)
+
 # -------- Biopython Imports for NCBI --------
 try:
     from Bio import Entrez, SeqIO
@@ -73,15 +84,6 @@ init_db()
 AQICN_TOKEN = os.environ.get("AQICN_TOKEN", "")
 CACHE_TTL_SECONDS = 600  # 10 minutes
 _cache: Dict[str, Dict[str, Any]] = {}
-
-app = FastAPI(title="AirGuard AI Backend")
-
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
 
 # ---------------------------
 # NCBI Helper Function
