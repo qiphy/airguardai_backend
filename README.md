@@ -25,8 +25,7 @@ This backend is built to satisfy the **KitaHack 2026 Technical Criteria**:
 
 
 * **Bio-Spark Risk Engine**:
-1. 
-**Genetic Analysis**: Machine-learning-driven viral sequence similarity.
+1. **Genetic Analysis**: Machine-learning-driven viral sequence similarity.
 
 
 2. **Environmental Response**: Applying a sub-linear biological response model ($α \approx 0.7$) to estimate respiratory vulnerability.
