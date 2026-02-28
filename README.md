@@ -9,23 +9,19 @@ This backend is built to satisfy the **KitaHack 2026 Technical Criteria**:
 * **Core AI Engine**: **Google Gemini AI (via Google AI Studio)**. We chose Gemini over other models for its superior multi-modal reasoning and seamless integration with the Google Cloud ecosystem.
 
 
-* 
-**Google Developer Technology**: **Firebase Admin SDK** is integrated to handle secure user authentication and real-time database synchronization.
+* **Google Developer Technology**: **Firebase Admin SDK** is integrated to handle secure user authentication and real-time database synchronization.
 
 
-* 
-**Framework**: **FastAPI (Python)** for asynchronous, high-speed API handling.
+* **Framework**: **FastAPI (Python)** for asynchronous, high-speed API handling.
 
 
-* 
-**Hosting**: Deployed on **Render** with a scalable architecture designed to eventually transition to **Google Cloud Run** for enterprise-level "Freemium" traffic.
+* **Hosting**: Deployed on **Render** with a scalable architecture designed to eventually transition to **Google Cloud Run** for enterprise-level "Freemium" traffic.
 
 
 
 ## 🏗️ Core Features
 
-* 
-**Real-Time Data Fetching**: Communicates with the AQICN API to retrieve hyper-local PM2.5 and AQI metrics.
+* **Real-Time Data Fetching**: Communicates with the AQICN API to retrieve hyper-local PM2.5 and AQI metrics.
 
 
 * **Bio-Spark Risk Engine**:
@@ -36,8 +32,7 @@ This backend is built to satisfy the **KitaHack 2026 Technical Criteria**:
 2. **Environmental Response**: Applying a sub-linear biological response model ($α \approx 0.7$) to estimate respiratory vulnerability.
 
 
-* 
-**AI-Driven Insights**: Uses **Gemini AI** to transform raw environmental data into localized health advice, providing the "why" behind health risks.
+* **AI-Driven Insights**: Uses **Gemini AI** to transform raw environmental data into localized health advice, providing the "why" behind health risks.
 
 
 
@@ -96,13 +91,10 @@ python -m uvicorn app:app --reload --host 0.0.0.0 --port 8080
 
 ## 📈 Impact & Technical Challenge
 
-* 
-**Challenge**: We initially faced high latency when correlating viral protein sequences with AQI data.
+* **Challenge**: We initially faced high latency when correlating viral protein sequences with AQI data.
 
 
-* 
-**Resolution**: We implemented an asynchronous polling mechanism in **FastAPI** that allows **Gemini** to process data in parallel, reducing response time by 40%.
+* **Resolution**: We implemented an asynchronous polling mechanism in **FastAPI** that allows **Gemini** to process data in parallel, reducing response time by 40%.
 
 
-* 
-**Metric**: Our goal is to provide a 15-minute early warning lead time for individuals in high-risk respiratory zones.
+* **Metric**: Our goal is to provide a 15-minute early warning lead time for individuals in high-risk respiratory zones.
