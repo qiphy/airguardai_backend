@@ -231,6 +231,32 @@ async def local_insight(payload: LocalInsightRequest):
         return {
             "insight": "### 🚨 Risk: UNKNOWN\n* Service is currently in offline mode.\n* Please maintain standard safety protocols.\n* Wash hands frequently."
         }
+    
+@app.get("/waqi/history")
+def get_waqi_history(lat: float, lng: float):
+    """
+    Since WAQI free API doesn't have a history endpoint, we fetch the 
+    standard feed and return the 'forecast' data which contains 
+    daily averages for the past week.
+    """
+    url = f"https://api.waqi.info/feed/geo:{lat};{lng}/?token={AQICN_TOKEN}"
+    try:
+        resp = requests.get(url, timeout=10)
+        data = resp.json()
+        
+        if data.get("status") == "ok":
+            # Extracting the daily forecast which contains past data averages
+            forecast = data.get("data", {}).get("forecast", {}).get("daily", {})
+            return {
+                "status": "ok",
+                "data": {
+                    "city": data["data"].get("city", {}),
+                    "forecast": {"daily": forecast}
+                }
+            }
+        return data
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
 @app.post("/predict")
 def predict(payload: PredictPayload):
