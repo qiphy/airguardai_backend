@@ -41,8 +41,7 @@ The backend provides the following endpoints for testing the working prototype:
 
 * `GET /health` – Service health check.
 * `GET /latest` – Fetches (and caches) real-time AQICN data.
-* 
-`POST /predict` – Runs the **Bio-Spark** engine on the latest readings to generate Gemini-powered health advice.
+* `POST /predict` – Runs the **Bio-Spark** engine on the latest readings to generate Gemini-powered health advice.
 
 
 
