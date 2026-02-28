@@ -8,7 +8,9 @@
 
 - Real-Time Data Fetching: Communicates with the AQICN API to retrieve hyper-local PM2.5 and AQI metrics. 
 
-1) Bio-Spark Risk Engine: Implements our two-step risk calculation:Genetic Analysis: Machine-learning-driven viral sequence similarity. 
+- Bio-Spark Risk Engine: Implements our two-step risk calculation:
+
+1) Genetic Analysis: Machine-learning-driven viral sequence similarity. 
 
 2) Environmental Response: Applying a sub-linear biological response model ($α \approx 0.7$) to estimate respiratory vulnerability. 
 
