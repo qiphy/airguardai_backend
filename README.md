@@ -88,3 +88,5 @@ python -m uvicorn app:app --reload --host 0.0.0.0 --port 8080
 
 
 * **Metric**: We track prediction accuracy by comparing Gemini’s generated health advice against historical WHO air quality guidelines.
+
+* **Team Members**: Oh Kuan Qi & Ng Jin Heng
