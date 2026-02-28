@@ -177,7 +177,7 @@ async def gemini_chat(payload: GeminiRequest):
         raise HTTPException(status_code=500, detail="GEMINI_KEY missing on server")
 
     # REST Endpoint for Gemini 2.5 Flash
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key={api_key}"
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-lite:generateContent?key={api_key}"
     
     headers = {'Content-Type': 'application/json'}
     payload_data = {
