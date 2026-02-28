@@ -1,6 +1,6 @@
 # AirGuard AI Backend (Local)
 
-🚀 AirGuard AI Backend (Python & Gemini)The AirGuard AI Backend is a high-performance FastAPI service that serves as the "brain" of our platform. It bridges real-time environmental data with our custom Bio-Spark Predictive Engine to calculate viral risks for urban communities. 
+🚀 AirGuard AI Backend (Python & Gemini): The AirGuard AI Backend is a high-performance FastAPI service that serves as the "brain" of our platform. It bridges real-time environmental data with our custom Bio-Spark Predictive Engine to calculate viral risks for urban communities. 
 
 🛠️ Tech Stack & Google Cloud IntegrationFramework: FastAPI (Python) for asynchronous, high-speed API handling. AI Engine: Integrated with Gemini AI via Google AI Studio for processing complex data correlations. +1Infrastructure: Designed for deployment on Firebase Cloud and Google Cloud Platform (GCP) to handle scalable "Freemium" traffic. 
 
