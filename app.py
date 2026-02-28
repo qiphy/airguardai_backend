@@ -76,6 +76,13 @@ _cache: Dict[str, Dict[str, Any]] = {}
 
 app = FastAPI(title="AirGuard AI Backend")
 
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
 # ---------------------------
 # NCBI Helper Function
 # ---------------------------
