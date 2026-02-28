@@ -10,9 +10,9 @@
 
 - Bio-Spark Risk Engine: Implements our two-step risk calculation:
 
-1) Genetic Analysis: Machine-learning-driven viral sequence similarity. 
+  1) Genetic Analysis: Machine-learning-driven viral sequence similarity. 
 
-2) Environmental Response: Applying a sub-linear biological response model ($α \approx 0.7$) to estimate respiratory vulnerability. 
+  2) Environmental Response: Applying a sub-linear biological response model ($α \approx 0.7$) to estimate respiratory vulnerability. 
 
 - Actionable Insights: Uses Gemini AI to transform raw data into simple, localized health advice.
 
