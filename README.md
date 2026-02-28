@@ -1,6 +1,6 @@
 # ⚙️ AirGuard AI Backend (FastAPI)
 
-**AirGuard AI Backend** is the high-performance "brain" of our platform. It bridges real-time environmental data with our custom **Bio-Spark Predictive Engine** to calculate viral risks for urban communities. This project directly addresses **UN SDG 3 (Good Health and Well-being)** and **SDG 11 (Sustainable Cities and Communities)**.
+**AirGuard AI Backend** is the high-performance "brain" of our platform. It bridges real-time environmental data with our custom **Bio-Spark Predictive Engine** to calculate viral risks for urban communities. This project directly addresses **UN SDG 3 (Good Health and Well-being)**, **SDG 10 (Reduced Inequalities)** and **SDG 11 (Sustainable Cities and Communities)**.
 
 ## 🛠️ Tech Stack & Google Integration
 
